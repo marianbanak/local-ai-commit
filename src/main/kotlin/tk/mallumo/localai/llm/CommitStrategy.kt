@@ -267,13 +267,14 @@ object CommitStrategy {
 
             val truncated = truncateDiff(combinedDiff.toString(), maxDiffTokens)
             listener.onProgress("Generating commit message...")
-            val (msg, loopDetected) = KoogLlmClient.generateStreaming(
+            val (rawMsg, loopDetected) = KoogLlmClient.generateStreaming(
                 baseUrlInput = baseUrl,
                 modelId = modelId,
                 systemPrompt = systemPrompt,
                 userPrompt = "Analyze the following git diff and output the requested commit message:$binaryNote\n\n$truncated",
                 onToken = { listener.onToken(it) }
             )
+            val msg = KoogLlmClient.sanitizeOutput(rawMsg)
 
             if (loopDetected) {
                 skippedFiles.addAll(chunkFiles)
@@ -295,13 +296,14 @@ object CommitStrategy {
                 }
 
                 val truncated = truncateDiff(chunkDiff.toString(), maxDiffTokens)
-                val (summary, loopDetected) = KoogLlmClient.generateStreaming(
+                val (rawSummary, loopDetected) = KoogLlmClient.generateStreaming(
                     baseUrlInput = baseUrl,
                     modelId = modelId,
                     systemPrompt = chunkSystemPrompt,
                     userPrompt = "Analyze the git diff for this subset of files and generate a detailed bulleted list of changes:\n\n$truncated",
                     onToken = { listener.onToken(it) }
                 )
+                val summary = KoogLlmClient.sanitizeOutput(rawSummary)
 
                 if (loopDetected) {
                     skippedFiles.addAll(chunk)
@@ -318,13 +320,14 @@ object CommitStrategy {
             } else {
                 listener.onProgress("Consolidating final commit message from ${summaries.size} summaries...")
                 val combinedSummaries = summaries.joinToString("\n\n")
-                val (msg, loopDetected) = KoogLlmClient.generateStreaming(
+                val (rawMsg, loopDetected) = KoogLlmClient.generateStreaming(
                     baseUrlInput = baseUrl,
                     modelId = modelId,
                     systemPrompt = finalSystemPrompt,
                     userPrompt = "Consolidate these change summaries into a unified Conventional Commit message:$binaryNote\n\n$combinedSummaries",
                     onToken = { listener.onToken(it) }
                 )
+                val msg = KoogLlmClient.sanitizeOutput(rawMsg)
 
                 if (loopDetected) {
                     finalCommitMsg =

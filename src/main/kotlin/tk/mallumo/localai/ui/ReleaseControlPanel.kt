@@ -27,6 +27,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import tk.mallumo.localai.git.GitChangesManager
+import tk.mallumo.localai.llm.KoogLlmClient
 import tk.mallumo.localai.llm.ReleaseReportStrategy
 import tk.mallumo.localai.llm.VersionExtractor
 import tk.mallumo.localai.settings.LocalAiCommitSettingsService
@@ -52,7 +53,13 @@ class ReleaseControlPanel(
     private var generationJob: Job? = null
     private var currentGeneratedReport: String = ""
 
-    // UI Components
+    // Card Layout container
+    private val cardLayout = CardLayout()
+    private val cardContainer = JPanel(cardLayout)
+
+    // --- CARD 1: FORM (Configuration & Initial State) ---
+    private val formCard = JPanel(BorderLayout())
+
     // 1. Guidelines / Warning Banner
     private val guidelinePanel = JPanel(BorderLayout()).apply {
         border = JBUI.Borders.compound(
@@ -69,11 +76,10 @@ class ReleaseControlPanel(
         addActionListener { onSwitchToCommitTab() }
     }
 
-    // 2. Configuration Form
+    // 2. Form Inputs
     private val configPanel = JPanel(GridBagLayout()).apply {
-        border = JBUI.Borders.empty(8, 12)
+        border = JBUI.Borders.empty(12)
     }
-
     private val repoComboBox = ComboBox<GitRepository>()
     private val versionFileComboBox = ComboBox<String>()
     private val browseVersionFileBtn = JButton(AllIcons.General.OpenDisk)
@@ -94,51 +100,77 @@ class ReleaseControlPanel(
             foreground = JBColor.GRAY
         }
 
-    // Action buttons
-    private val generateBtn = JButton("⚡ Generate Release Report").apply {
-        putClientProperty(DarculaButtonUI.DEFAULT_STYLE_KEY, true)
-    }
-    private val cancelGenBtn = JButton("Cancel Generation").apply { isVisible = false }
-    private val confirmReleaseBtn = JButton("✓ Confirm Release", AllIcons.Actions.Checked).apply {
-        isVisible = false
-        putClientProperty(DarculaButtonUI.DEFAULT_STYLE_KEY, true)
-    }
-    private val cancelReviewBtn = JButton("Cancel", AllIcons.Actions.Cancel).apply { isVisible = false }
-    private val copyBtn = JButton("📋 Copy Report", AllIcons.Actions.Copy).apply { isEnabled = false }
-
-    // Output & Progress
-    private val statusLabel = JBLabel("Ready", SwingConstants.LEFT).apply {
+    private val formStatusLabel = JBLabel("Ready", SwingConstants.LEFT).apply {
         font = font.deriveFont(Font.ITALIC, 11f)
         foreground = JBColor.GRAY
     }
-    private val reportTextArea = JBTextArea().apply {
+
+    private val generateBtn = JButton("⚡ Generate Release Report").apply {
+        font = font.deriveFont(Font.BOLD, 13f)
+        putClientProperty(DarculaButtonUI.DEFAULT_STYLE_KEY, true)
+        putClientProperty("JButton.styleDefault", true)
+        putClientProperty("ActionToolbar.accentButton", true)
+    }
+
+    // --- CARD 2: STREAM (Live generation console) ---
+    private val streamCard = JPanel(BorderLayout())
+    private val streamProgressLabel = JBLabel("Generating release report...", SwingConstants.LEFT).apply {
+        font = font.deriveFont(Font.BOLD, 12f)
+    }
+    private val streamConsole = JBTextArea().apply {
+        isEditable = false
+        font = Font(Font.MONOSPACED, Font.PLAIN, 12)
+        lineWrap = true
+        wrapStyleWord = true
+    }
+    private val cancelGenBtn = JButton("Cancel Generation", AllIcons.Actions.Cancel)
+
+    // --- CARD 3: PREVIEW (Review & Confirm) ---
+    private val previewCard = JPanel(BorderLayout())
+    private val previewEditor = JBTextArea().apply {
         isEditable = true
         lineWrap = true
         wrapStyleWord = true
         font = Font(Font.MONOSPACED, Font.PLAIN, 12)
     }
+    private val confirmReleaseBtn = JButton("✓ Confirm Release", AllIcons.Actions.Checked).apply {
+        font = font.deriveFont(Font.BOLD, 13f)
+        putClientProperty(DarculaButtonUI.DEFAULT_STYLE_KEY, true)
+        putClientProperty("JButton.styleDefault", true)
+        putClientProperty("ActionToolbar.accentButton", true)
+    }
+    private val regenerateBtn = JButton("Regenerate", AllIcons.Actions.Refresh)
+    private val cancelPreviewBtn = JButton("Cancel", AllIcons.Actions.Cancel)
+    private val copyBtn = JButton("📋 Copy Report", AllIcons.Actions.Copy)
 
     init {
-        border = JBUI.Borders.empty()
-        buildUI()
+        border = JBUI.Borders.empty(6)
+        buildFormCard()
+        buildStreamCard()
+        buildPreviewCard()
+
+        cardContainer.add(formCard, "FORM")
+        cardContainer.add(streamCard, "STREAM")
+        cardContainer.add(previewCard, "PREVIEW")
+
+        add(cardContainer, BorderLayout.CENTER)
+        cardLayout.show(cardContainer, "FORM")
+
         reloadRepositories()
         updateGuideline()
     }
 
-    private fun buildUI() {
-        // 1. Top Guidelines
-        val guideRightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 4, 0))
-        guideRightPanel.isOpaque = false
+    private fun buildFormCard() {
+        // Guideline Banner
+        val guideRightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 4, 0)).apply { isOpaque = false }
         guideRightPanel.add(resolveChangesBtn)
         guidelinePanel.add(guidelineLabel, BorderLayout.CENTER)
         guidelinePanel.add(guideRightPanel, BorderLayout.EAST)
-        add(guidelinePanel, BorderLayout.NORTH)
+        formCard.add(guidelinePanel, BorderLayout.NORTH)
 
-        // 2. Center Content: Form + Action Bar + Report Area
-        val centerContainer = JPanel(BorderLayout())
-
+        // Config Grid
         val gbc = GridBagConstraints().apply {
-            insets = JBUI.insets(4, 4)
+            insets = JBUI.insets(5, 4)
             anchor = GridBagConstraints.WEST
             fill = GridBagConstraints.HORIZONTAL
         }
@@ -175,7 +207,7 @@ class ReleaseControlPanel(
         configPanel.add(repoComboBox, gbc)
         gbc.gridwidth = 1
 
-        // Row 1: Version File Selection & Version number
+        // Row 1: Version File & Version
         row++
         gbc.gridx = 0; gbc.gridy = row; gbc.weightx = 0.0
         configPanel.add(JBLabel("Version File:"), gbc)
@@ -227,7 +259,7 @@ class ReleaseControlPanel(
         gbc.gridx = 2; gbc.weightx = 0.5
         configPanel.add(releaseBranchPanel, gbc)
 
-        // Row 3: Commit Diff Mode (Auto vs Manual)
+        // Row 3: Commit Diff Mode
         row++
         gbc.gridx = 0; gbc.gridy = row; gbc.weightx = 0.0
         configPanel.add(JBLabel("Commit Range:"), gbc)
@@ -238,7 +270,7 @@ class ReleaseControlPanel(
         configPanel.add(rangeConfigPanel, gbc)
         gbc.gridwidth = 1
 
-        // Row 4: Manual Revision input row (conditional)
+        // Row 4: Revision input panel (for manual mode or fallback)
         row++
         gbc.gridx = 1; gbc.gridy = row; gbc.weightx = 1.0; gbc.gridwidth = 2
         revisionPanel.add(JBLabel("Revision:"), BorderLayout.WEST)
@@ -255,38 +287,83 @@ class ReleaseControlPanel(
             repaint()
         }
 
-        // Action Toolbar
-        val actionToolbar = JPanel(FlowLayout(FlowLayout.LEFT, 10, 6)).apply {
+        // Center Content wrapper
+        val centerBox = JPanel(BorderLayout()).apply {
+            add(configPanel, BorderLayout.NORTH)
+        }
+        formCard.add(JBScrollPane(centerBox).apply { border = JBUI.Borders.empty() }, BorderLayout.CENTER)
+
+        // Form Bottom Action Bar
+        val bottomBar = JPanel(BorderLayout()).apply {
             border = JBUI.Borders.compound(
-                JBUI.Borders.customLine(JBColor.border(), 1, 0, 1, 0),
-                JBUI.Borders.empty(4, 6)
+                JBUI.Borders.customLine(JBColor.border(), 1, 0, 0, 0),
+                JBUI.Borders.empty(10, 12)
             )
         }
+        bottomBar.add(formStatusLabel, BorderLayout.WEST)
+
+        val btnPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply { isOpaque = false }
         generateBtn.addActionListener { startReportGeneration() }
-        cancelGenBtn.addActionListener { cancelGeneration() }
+        btnPanel.add(generateBtn)
+        bottomBar.add(btnPanel, BorderLayout.EAST)
+
+        formCard.add(bottomBar, BorderLayout.SOUTH)
+    }
+
+    private fun buildStreamCard() {
+        val topBar = JPanel(BorderLayout()).apply {
+            border = JBUI.Borders.compound(
+                JBUI.Borders.customLine(JBColor.border(), 0, 0, 1, 0),
+                JBUI.Borders.empty(8, 12)
+            )
+            add(streamProgressLabel, BorderLayout.CENTER)
+            cancelGenBtn.addActionListener { cancelGeneration() }
+            add(cancelGenBtn, BorderLayout.EAST)
+        }
+
+        streamCard.add(topBar, BorderLayout.NORTH)
+        streamCard.add(JBScrollPane(streamConsole).apply {
+            border = JBUI.Borders.empty(8)
+        }, BorderLayout.CENTER)
+    }
+
+    private fun buildPreviewCard() {
+        val topBar = JPanel(BorderLayout()).apply {
+            border = JBUI.Borders.compound(
+                JBUI.Borders.customLine(JBColor.border(), 0, 0, 1, 0),
+                JBUI.Borders.empty(8, 12)
+            )
+            val title = JBLabel("Generated Release Report (Review and edit before confirming):").apply {
+                font = font.deriveFont(Font.BOLD, 12f)
+            }
+            add(title, BorderLayout.CENTER)
+        }
+
+        previewCard.add(topBar, BorderLayout.NORTH)
+        previewCard.add(JBScrollPane(previewEditor).apply {
+            border = JBUI.Borders.empty(8)
+        }, BorderLayout.CENTER)
+
+        val bottomBar = JPanel(FlowLayout(FlowLayout.RIGHT, 10, 8)).apply {
+            border = JBUI.Borders.compound(
+                JBUI.Borders.customLine(JBColor.border(), 1, 0, 0, 0),
+                JBUI.Borders.empty(4, 8)
+            )
+        }
+
         confirmReleaseBtn.addActionListener { executeConfirmRelease() }
-        cancelReviewBtn.addActionListener { resetReviewState() }
+        regenerateBtn.addActionListener { startReportGeneration() }
+        cancelPreviewBtn.addActionListener {
+            cardLayout.show(cardContainer, "FORM")
+        }
         copyBtn.addActionListener { copyReportToClipboard() }
 
-        actionToolbar.add(generateBtn)
-        actionToolbar.add(cancelGenBtn)
-        actionToolbar.add(confirmReleaseBtn)
-        actionToolbar.add(cancelReviewBtn)
-        actionToolbar.add(copyBtn)
-        actionToolbar.add(Box.createHorizontalStrut(15))
-        actionToolbar.add(statusLabel)
+        bottomBar.add(copyBtn)
+        bottomBar.add(cancelPreviewBtn)
+        bottomBar.add(regenerateBtn)
+        bottomBar.add(confirmReleaseBtn)
 
-        val topSection = JPanel(BorderLayout())
-        topSection.add(configPanel, BorderLayout.CENTER)
-        topSection.add(actionToolbar, BorderLayout.SOUTH)
-        centerContainer.add(topSection, BorderLayout.NORTH)
-
-        val scrollPane = JBScrollPane(reportTextArea).apply {
-            border = JBUI.Borders.empty(8)
-        }
-        centerContainer.add(scrollPane, BorderLayout.CENTER)
-
-        add(centerContainer, BorderLayout.CENTER)
+        previewCard.add(bottomBar, BorderLayout.SOUTH)
     }
 
     fun reloadRepositories() {
@@ -324,7 +401,7 @@ class ReleaseControlPanel(
             return
         }
 
-        // 1. Populate Branches asynchronously on Dispatchers.IO to avoid blocking EDT
+        // Populate Branches & Candidates asynchronously on Dispatchers.IO to avoid blocking EDT
         cs.launch(Dispatchers.IO) {
             val branches = gitChangesManager.getLocalBranches(repo)
             val currentBranch = repo.currentBranchName
@@ -384,11 +461,11 @@ class ReleaseControlPanel(
         val v = VersionExtractor.extractVersionFast(file)
         if (!v.isNullOrBlank()) {
             detectedVersionField.text = v
-            statusLabel.text = "Detected version $v from ${file.name}"
-            statusLabel.foreground = JBColor(0x388E3C, 0x81C784)
+            formStatusLabel.text = "Detected version $v from ${file.name}"
+            formStatusLabel.foreground = JBColor(0x388E3C, 0x81C784)
         } else {
-            statusLabel.text = "Could not parse version from ${file.name}. Enter manually or use AI Extract."
-            statusLabel.foreground = JBColor.GRAY
+            formStatusLabel.text = "Could not parse version from ${file.name}. Enter manually or use AI Extract."
+            formStatusLabel.foreground = JBColor.GRAY
         }
         updateDefaultReleaseBranch()
     }
@@ -400,8 +477,8 @@ class ReleaseControlPanel(
             return
         }
 
-        statusLabel.text = "Querying AI for version string..."
-        statusLabel.foreground = JBColor.BLUE
+        formStatusLabel.text = "Querying AI for version string..."
+        formStatusLabel.foreground = JBColor.BLUE
         detectVersionAiBtn.isEnabled = false
 
         cs.launch {
@@ -410,12 +487,12 @@ class ReleaseControlPanel(
                 detectVersionAiBtn.isEnabled = true
                 if (!version.isNullOrBlank()) {
                     detectedVersionField.text = version
-                    statusLabel.text = "AI extracted version $version"
-                    statusLabel.foreground = JBColor(0x388E3C, 0x81C784)
+                    formStatusLabel.text = "AI extracted version $version"
+                    formStatusLabel.foreground = JBColor(0x388E3C, 0x81C784)
                     updateDefaultReleaseBranch()
                 } else {
-                    statusLabel.text = "AI could not detect version in ${file.name}."
-                    statusLabel.foreground = JBColor.RED
+                    formStatusLabel.text = "AI could not detect version in ${file.name}."
+                    formStatusLabel.foreground = JBColor.RED
                 }
             }
         }
@@ -525,18 +602,14 @@ class ReleaseControlPanel(
             return
         }
 
-        statusLabel.text = "Resolving git commit differences between branches..."
-        statusLabel.foreground = JBColor.BLUE
-        generateBtn.isEnabled = false
-        cancelGenBtn.isVisible = true
-        confirmReleaseBtn.isVisible = false
-        cancelReviewBtn.isVisible = false
-        copyBtn.isEnabled = false
-        reportTextArea.text = ""
+        // Switch to STREAM card immediately
+        val consoleStreamer = ThinkingConsoleStreamer(streamConsole)
+        consoleStreamer.reset()
+        streamProgressLabel.text = "Resolving git commit differences between branches..."
+        cardLayout.show(cardContainer, "STREAM")
 
         generationJob = cs.launch(Dispatchers.IO) {
             try {
-                // Check if this is the first release (no previous release branch or marker detected)
                 val isAuto = autoCompareBranchesCheckbox.isSelected
                 if (isAuto && !gitChangesManager.hasPreviousRelease(repo, releaseBranch, sourceBranch)) {
                     val rootCommit = gitChangesManager.getRootCommit(repo)
@@ -546,11 +619,10 @@ class ReleaseControlPanel(
                         if (!rootCommit.isNullOrBlank()) {
                             revisionField.text = rootCommit
                         }
-                        statusLabel.text =
+                        formStatusLabel.text =
                             "No previous release detected. Please verify or paste the starting commit revision."
-                        statusLabel.foreground = JBColor(0xE65100, 0xFFB74D) // Amber warning
-                        generateBtn.isEnabled = true
-                        cancelGenBtn.isVisible = false
+                        formStatusLabel.foreground = JBColor(0xE65100, 0xFFB74D) // Amber warning
+                        cardLayout.show(cardContainer, "FORM")
                     }
                     return@launch
                 }
@@ -560,18 +632,16 @@ class ReleaseControlPanel(
                     ApplicationManager.getApplication().invokeLater {
                         autoCompareBranchesCheckbox.isSelected = false
                         revisionPanel.isVisible = true
-                        statusLabel.text =
+                        formStatusLabel.text =
                             "No commits found. Please paste revision number of branch where commit history starts."
-                        statusLabel.foreground = JBColor.RED
-                        generateBtn.isEnabled = true
-                        cancelGenBtn.isVisible = false
+                        formStatusLabel.foreground = JBColor.RED
+                        cardLayout.show(cardContainer, "FORM")
                     }
                     return@launch
                 }
 
                 ApplicationManager.getApplication().invokeLater {
-                    statusLabel.text = "Streaming release report from AI..."
-                    statusLabel.foreground = JBColor.BLUE
+                    streamProgressLabel.text = "Streaming release report from AI..."
                 }
 
                 val flow = ReleaseReportStrategy.generateReleaseReportStream(
@@ -585,29 +655,23 @@ class ReleaseControlPanel(
                 flow.collect { token ->
                     fullBuffer.append(token)
                     ApplicationManager.getApplication().invokeLater {
-                        reportTextArea.append(token)
-                        reportTextArea.caretPosition = reportTextArea.document.length
+                        consoleStreamer.appendToken(token)
                     }
                 }
 
-                currentGeneratedReport = fullBuffer.toString()
+                currentGeneratedReport = KoogLlmClient.sanitizeOutput(fullBuffer.toString())
 
                 ApplicationManager.getApplication().invokeLater {
-                    statusLabel.text = "Release report ready. Review message and confirm release."
-                    statusLabel.foreground = JBColor(0x2E7D32, 0x81C784)
-                    generateBtn.isVisible = false
-                    cancelGenBtn.isVisible = false
-                    confirmReleaseBtn.isVisible = true
-                    cancelReviewBtn.isVisible = true
-                    copyBtn.isEnabled = true
+                    previewEditor.text = currentGeneratedReport
+                    previewEditor.caretPosition = 0
+                    cardLayout.show(cardContainer, "PREVIEW")
                 }
             } catch (e: Exception) {
                 LOG.warn("Release report generation failed: ${e.message}", e)
                 ApplicationManager.getApplication().invokeLater {
-                    statusLabel.text = "Generation error: ${e.message}"
-                    statusLabel.foreground = JBColor.RED
-                    generateBtn.isEnabled = true
-                    cancelGenBtn.isVisible = false
+                    formStatusLabel.text = "Generation error: ${e.message}"
+                    formStatusLabel.foreground = JBColor.RED
+                    cardLayout.show(cardContainer, "FORM")
                 }
             }
         }
@@ -616,12 +680,10 @@ class ReleaseControlPanel(
     private fun resolveCommitLogs(repo: GitRepository, sourceBranch: String, releaseBranch: String): String {
         val isAuto = autoCompareBranchesCheckbox.isSelected
         if (isAuto) {
-            // Find merge-base with release branch or parent/tag
             val existingBranches = gitChangesManager.getLocalBranches(repo)
             val baseCommit = if (existingBranches.contains(releaseBranch)) {
                 gitChangesManager.getMergeBase(repo, releaseBranch, sourceBranch)
             } else {
-                // If release branch doesn't exist yet, search previous release commit or parent
                 val prevRelease = gitChangesManager.findReleaseCommitTimestamp(repo)
                 prevRelease?.first
             }
@@ -643,25 +705,13 @@ class ReleaseControlPanel(
 
     private fun cancelGeneration() {
         generationJob?.cancel()
-        statusLabel.text = "Generation cancelled."
-        statusLabel.foreground = JBColor.GRAY
-        generateBtn.isEnabled = true
-        generateBtn.isVisible = true
-        cancelGenBtn.isVisible = false
-    }
-
-    private fun resetReviewState() {
-        generateBtn.isVisible = true
-        generateBtn.isEnabled = true
-        confirmReleaseBtn.isVisible = false
-        cancelReviewBtn.isVisible = false
-        cancelGenBtn.isVisible = false
-        statusLabel.text = "Release review cancelled."
-        statusLabel.foreground = JBColor.GRAY
+        formStatusLabel.text = "Generation cancelled."
+        formStatusLabel.foreground = JBColor.GRAY
+        cardLayout.show(cardContainer, "FORM")
     }
 
     private fun copyReportToClipboard() {
-        val text = reportTextArea.text
+        val text = previewEditor.text
         if (text.isNotBlank()) {
             val clipboard = Toolkit.getDefaultToolkit().systemClipboard
             clipboard.setContents(StringSelection(text), null)
@@ -680,7 +730,7 @@ class ReleaseControlPanel(
         val version = detectedVersionField.text.trim()
         val releaseBranch = releaseBranchField.text.trim().ifBlank { "release/$version" }
         val sourceBranch = sourceBranchComboBox.selectedItem as? String ?: repo.currentBranchName ?: "HEAD"
-        val report = reportTextArea.text.trim()
+        val report = previewEditor.text.trim()
 
         val commitTitle =
             if (version.isNotBlank()) "chore(release): prepare release v$version" else "chore(release): release report"
@@ -754,7 +804,9 @@ class ReleaseControlPanel(
                         )
                         .notify(project)
 
-                    resetReviewState()
+                    cardLayout.show(cardContainer, "FORM")
+                    formStatusLabel.text = "Release '$releaseBranch' created and committed successfully."
+                    formStatusLabel.foreground = JBColor(0x2E7D32, 0x81C784)
                     onReleaseCommitted()
                 }
             } catch (e: Exception) {

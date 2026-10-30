@@ -1,16 +1,7 @@
 package tk.mallumo.localai.llm
 
-import ai.koog.prompt.Prompt
-import ai.koog.prompt.executor.clients.openai.OpenAIClientSettings
-import ai.koog.prompt.executor.clients.openai.OpenAILLMClient
-import ai.koog.prompt.llm.LLMProvider
-import ai.koog.prompt.llm.LLModel
-import ai.koog.prompt.message.Message
-import ai.koog.prompt.message.RequestMetaInfo
-import ai.koog.prompt.streaming.StreamFrame
 import com.intellij.openapi.diagnostic.Logger
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -211,56 +202,8 @@ object KoogLlmClient {
         onToken: suspend (String) -> Unit
     ): Pair<String, Boolean> = withContext(Dispatchers.IO) {
         val baseUrl = normalizeUrl(baseUrlInput)
-        val fullContent = StringBuilder()
-        var loopDetected = false
-
-        // Attempt 1: Using Koog's OpenAILLMClient
-        try {
-            val settings = OpenAIClientSettings(baseUrl = baseUrl)
-            val client = OpenAILLMClient(apiKey = "local", settings = settings)
-            val prompt = Prompt(
-                messages = listOf(
-                    Message.System(content = systemPrompt, metaInfo = RequestMetaInfo.Empty),
-                    Message.User(content = userPrompt, metaInfo = RequestMetaInfo.Empty)
-                ),
-                id = "commit-generation"
-            )
-            val model = LLModel(
-                provider = LLMProvider("openai", "OpenAI"),
-                id = modelId.ifBlank { "default" }
-            )
-
-            val flow: Flow<StreamFrame> = client.executeStreaming(prompt, model, emptyList())
-            flow.collect { frame ->
-                if (frame is StreamFrame.TextDelta) {
-                    val delta = frame.text
-                    if (delta.isNotEmpty()) {
-                        fullContent.append(delta)
-                        onToken(delta)
-                        if (LoopDetector.detectRepetitionLoop(fullContent.toString())) {
-                            loopDetected = true
-                            throw RepetitionLoopException()
-                        }
-                    }
-                }
-            }
-        } catch (e: RepetitionLoopException) {
-            // Loop detected and halted early
-            loopDetected = true
-        } catch (e: Exception) {
-            LOG.info("Koog client stream encountered: ${e.message}, falling back to direct SSE connection")
-            // Attempt 2: Direct SSE HTTP streaming as robust fallback
-            if (fullContent.isEmpty()) {
-                val sseResult = runDirectSse(baseUrl, modelId, systemPrompt, userPrompt, onToken)
-                return@withContext sseResult
-            }
-        }
-
-        var result = fullContent.toString().trim()
-        if (loopDetected) {
-            result = LoopDetector.deduplicateConsecutiveLines(result)
-        }
-        Pair(result, loopDetected)
+        // Direct SSE streaming handles both standard content and reasoning_content (deepseek/thinking models)
+        runDirectSse(baseUrl, modelId, systemPrompt, userPrompt, onToken)
     }
 
     private suspend fun runDirectSse(
@@ -277,7 +220,7 @@ object KoogLlmClient {
             val chatUrl = URI("$baseUrl/v1/chat/completions").toURL()
             val conn = chatUrl.openConnection() as HttpURLConnection
             conn.connectTimeout = 10000
-            conn.readTimeout = 60000
+            conn.readTimeout = 120000
             conn.requestMethod = "POST"
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json")
@@ -301,41 +244,84 @@ object KoogLlmClient {
             if (conn.responseCode in 200..299) {
                 BufferedReader(InputStreamReader(conn.inputStream, StandardCharsets.UTF_8)).use { reader ->
                     var line: String? = reader.readLine()
+                    var isInReasoningBlock = false
                     while (line != null) {
                         line = line.trim()
                         if (line.startsWith("data: ")) {
                             val dataStr = line.substring(6).trim()
-                            if (dataStr == "[DONE]") break
-                            val deltaContent = extractDeltaContent(dataStr)
-                            if (deltaContent.isNotEmpty()) {
-                                fullContent.append(deltaContent)
-                                onToken(deltaContent)
-                                if (LoopDetector.detectRepetitionLoop(fullContent.toString())) {
-                                    loopDetected = true
-                                    break
+                            if (dataStr == "[DONE]") {
+                                if (isInReasoningBlock) {
+                                    onToken("\n</think>\n\n")
+                                    isInReasoningBlock = false
+                                }
+                                break
+                            }
+                            val (content, isReasoning) = extractDeltaToken(dataStr)
+                            if (content.isNotEmpty()) {
+                                if (isReasoning) {
+                                    if (!isInReasoningBlock) {
+                                        isInReasoningBlock = true
+                                        onToken("<think>\n")
+                                    }
+                                    onToken(content)
+                                } else {
+                                    if (isInReasoningBlock) {
+                                        isInReasoningBlock = false
+                                        onToken("\n</think>\n\n")
+                                    }
+                                    fullContent.append(content)
+                                    onToken(content)
+                                    if (LoopDetector.detectRepetitionLoop(fullContent.toString())) {
+                                        loopDetected = true
+                                        break
+                                    }
                                 }
                             }
                         }
                         line = reader.readLine()
                     }
                 }
+            } else {
+                LOG.warn("Direct SSE received response code: ${conn.responseCode}")
             }
         } catch (e: Exception) {
             LOG.warn("Direct SSE connection failed: ${e.message}")
         }
 
         var result = fullContent.toString().trim()
+        result = sanitizeOutput(result)
         if (loopDetected) {
             result = LoopDetector.deduplicateConsecutiveLines(result)
         }
         return Pair(result, loopDetected)
     }
 
-    private fun extractDeltaContent(json: String): String {
+    /**
+     * Ensures any lingering <think>...</think> tags or reasoning artifacts are completely stripped
+     * from the returned final message string so they are never fed into chunk summaries,
+     * consolidation, or commit messages.
+     */
+    fun sanitizeOutput(raw: String): String {
+        if (raw.isBlank()) return ""
+        val withoutFullTags = raw.replace(Regex("""<think>.*?</think>""", RegexOption.DOT_MATCHES_ALL), "")
+        val withoutOpenTags = withoutFullTags.replace(Regex("""<think>.*$""", RegexOption.DOT_MATCHES_ALL), "")
+        return withoutOpenTags.trim()
+    }
+
+    private fun extractDeltaToken(json: String): Pair<String, Boolean> {
         val contentRegex = """"content"\s*:\s*"((?:[^"\\]|\\.)*)"""".toRegex()
-        val match = contentRegex.find(json) ?: return ""
-        val raw = match.groupValues[1]
-        return unescapeJson(raw)
+        val contentMatch = contentRegex.find(json)
+        if (contentMatch != null) {
+            return Pair(unescapeJson(contentMatch.groupValues[1]), false)
+        }
+
+        val reasoningRegex = """"reasoning_content"\s*:\s*"((?:[^"\\]|\\.)*)"""".toRegex()
+        val reasoningMatch = reasoningRegex.find(json)
+        if (reasoningMatch != null) {
+            return Pair(unescapeJson(reasoningMatch.groupValues[1]), true)
+        }
+
+        return Pair("", false)
     }
 
     private fun unescapeJson(escaped: String): String {

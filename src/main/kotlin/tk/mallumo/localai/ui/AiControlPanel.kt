@@ -443,7 +443,8 @@ class AiControlPanel(
     private fun startGeneration() {
         if (currentSelectedFiles.isEmpty()) return
 
-        streamConsole.text = ""
+        val consoleStreamer = ThinkingConsoleStreamer(streamConsole)
+        consoleStreamer.reset()
         streamStepLabel.text = "Starting..."
         cardLayout.show(cardContainer, "STREAM")
 
@@ -454,7 +455,7 @@ class AiControlPanel(
                 if (settings.reformatCode || settings.optimizeImports || settings.rearrangeCode) {
                     ApplicationManager.getApplication().invokeLater {
                         streamStepLabel.text = "Applying pre-commit code actions (Reformat, Optimize, Rearrange)..."
-                        streamConsole.append("▶ Applying code styles and import optimizations...\n")
+                        consoleStreamer.appendProgress("Applying code styles and import optimizations...")
                     }
                     CodeFormattingService.formatFiles(
                         project = project,
@@ -468,7 +469,7 @@ class AiControlPanel(
                 // 2. Diff extraction
                 ApplicationManager.getApplication().invokeLater {
                     streamStepLabel.text = "Extracting git diffs..."
-                    streamConsole.append("▶ Reading git diffs for ${currentSelectedFiles.size} file(s)...\n")
+                    consoleStreamer.appendProgress("Reading git diffs for ${currentSelectedFiles.size} file(s)...")
                 }
 
                 val fileStatuses = mutableMapOf<String, String>()
@@ -491,21 +492,19 @@ class AiControlPanel(
                     override suspend fun onProgress(message: String) {
                         ApplicationManager.getApplication().invokeLater {
                             streamStepLabel.text = message
-                            streamConsole.append("▶ $message\n")
+                            consoleStreamer.appendProgress(message)
                         }
                     }
 
                     override suspend fun onToken(token: String) {
                         ApplicationManager.getApplication().invokeLater {
-                            streamConsole.append(token)
-                            streamConsole.caretPosition = streamConsole.document.length
+                            consoleStreamer.appendToken(token)
                         }
                     }
 
                     override suspend fun onChunkComplete(title: String, summary: String) {
                         ApplicationManager.getApplication().invokeLater {
-                            streamConsole.append("\n\n[$title Ready]\n" + "-".repeat(40) + "\n\n")
-                            streamConsole.caretPosition = streamConsole.document.length
+                            consoleStreamer.appendChunkComplete(title)
                         }
                     }
                 }
