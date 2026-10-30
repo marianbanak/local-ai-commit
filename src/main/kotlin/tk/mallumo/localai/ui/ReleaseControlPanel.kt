@@ -27,7 +27,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import tk.mallumo.localai.git.GitChangesManager
-import tk.mallumo.localai.llm.KoogLlmClient
 import tk.mallumo.localai.llm.ReleaseReportStrategy
 import tk.mallumo.localai.llm.VersionExtractor
 import tk.mallumo.localai.settings.LocalAiCommitSettingsService
@@ -590,26 +589,29 @@ class ReleaseControlPanel(
             return
         }
 
-        // Check if release branch already exists before generating report
-        if (gitChangesManager.branchOrTagExists(repo, releaseBranch)) {
-            Messages.showWarningDialog(
-                project,
-                "The release branch '$releaseBranch' already exists in '${repo.root.name}'.\n\n" +
-                        "Please update the version number in your version file (e.g. bump patch or minor version) " +
-                        "or specify a unique release branch name before proceeding.",
-                "Release Branch Already Exists"
-            )
-            return
-        }
-
         // Switch to STREAM card immediately
         val consoleStreamer = ThinkingConsoleStreamer(streamConsole)
         consoleStreamer.reset()
-        streamProgressLabel.text = "Resolving git commit differences between branches..."
+        streamProgressLabel.text = "Checking release configuration..."
         cardLayout.show(cardContainer, "STREAM")
 
         generationJob = cs.launch(Dispatchers.IO) {
             try {
+                // Check if release branch already exists before generating report (on IO thread to prevent EDT assertions)
+                if (gitChangesManager.branchOrTagExists(repo, releaseBranch)) {
+                    ApplicationManager.getApplication().invokeLater {
+                        cardLayout.show(cardContainer, "FORM")
+                        Messages.showWarningDialog(
+                            project,
+                            "The release branch '$releaseBranch' already exists in '${repo.root.name}'.\n\n" +
+                                    "Please update the version number in your version file (e.g. bump patch or minor version) " +
+                                    "or specify a unique release branch name before proceeding.",
+                            "Release Branch Already Exists"
+                        )
+                    }
+                    return@launch
+                }
+
                 val isAuto = autoCompareBranchesCheckbox.isSelected
                 if (isAuto && !gitChangesManager.hasPreviousRelease(repo, releaseBranch, sourceBranch)) {
                     val rootCommit = gitChangesManager.getRootCommit(repo)
@@ -644,22 +646,18 @@ class ReleaseControlPanel(
                     streamProgressLabel.text = "Streaming release report from AI..."
                 }
 
-                val flow = ReleaseReportStrategy.generateReleaseReportStream(
+                val (finalReport, _) = ReleaseReportStrategy.generateReleaseReport(
                     settingsService = settingsService,
                     version = version,
-                    commitLogs = commitLogs
+                    commitLogs = commitLogs,
+                    onToken = { token ->
+                        ApplicationManager.getApplication().invokeLater {
+                            consoleStreamer.appendToken(token)
+                        }
+                    }
                 )
 
-                val fullBuffer = StringBuilder()
-
-                flow.collect { token ->
-                    fullBuffer.append(token)
-                    ApplicationManager.getApplication().invokeLater {
-                        consoleStreamer.appendToken(token)
-                    }
-                }
-
-                currentGeneratedReport = KoogLlmClient.sanitizeOutput(fullBuffer.toString())
+                currentGeneratedReport = finalReport
 
                 ApplicationManager.getApplication().invokeLater {
                     previewEditor.text = currentGeneratedReport
@@ -748,18 +746,20 @@ class ReleaseControlPanel(
         )
         if (proceed != Messages.YES) return
 
-        if (gitChangesManager.branchOrTagExists(repo, releaseBranch)) {
-            Messages.showWarningDialog(
-                project,
-                "The release branch '$releaseBranch' already exists in '${repo.root.name}'.\n\n" +
-                        "Please update the version number or specify a different branch name before proceeding.",
-                "Release Branch Already Exists"
-            )
-            return
-        }
-
         cs.launch(Dispatchers.IO) {
             try {
+                if (gitChangesManager.branchOrTagExists(repo, releaseBranch)) {
+                    ApplicationManager.getApplication().invokeLater {
+                        Messages.showWarningDialog(
+                            project,
+                            "The release branch '$releaseBranch' already exists in '${repo.root.name}'.\n\n" +
+                                    "Please update the version number or specify a different branch name before proceeding.",
+                            "Release Branch Already Exists"
+                        )
+                    }
+                    return@launch
+                }
+
                 // 1. Create and checkout the release branch from source branch
                 val branchCreated = gitChangesManager.createAndCheckoutBranch(repo, releaseBranch, sourceBranch)
                 if (!branchCreated) {
@@ -778,10 +778,6 @@ class ReleaseControlPanel(
                 // 3. Commit release message
                 val commitHandler = GitLineHandler(project, repo.root, GitCommand.COMMIT).apply {
                     addParameters("-m", fullCommitMessage, "--allow-empty")
-                    if (versionFile != null) {
-                        val relPath = VfsUtil.getRelativePath(versionFile, repo.root) ?: versionFile.name
-                        addParameters("--", relPath)
-                    }
                 }
                 val commitRes = Git.getInstance().runCommand(commitHandler)
                 if (!commitRes.success()) {

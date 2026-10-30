@@ -1,7 +1,5 @@
 package tk.mallumo.localai.llm
 
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
 import tk.mallumo.localai.settings.LocalAiCommitSettingsService
 
 object ReleaseReportStrategy {
@@ -14,15 +12,16 @@ The report must include:
 2. Grouped Changes: Organize individual changes into logical categories (e.g., Features, Bug Fixes, Refactoring, Documentation) with detailed bullet points. Include brief explanations.
 3. Impact Analysis: Explain any overall architecture impacts, codebase health changes, or key dependencies introduced.
 
-Use clean Markdown formatting. Do not wrap the output in markdown code blocks. Start directly with the report title '# RELEASE' followed by 3 empty lines."""
+Use clean Markdown formatting. Do not wrap the output in markdown code blocks. Do not repeat or include the '# RELEASE' title header as it is already added. Start directly with '1. Executive Summary:'."""
 
-    fun generateReleaseReportStream(
+    suspend fun generateReleaseReport(
         settingsService: LocalAiCommitSettingsService,
         version: String,
-        commitLogs: String
-    ): Flow<String> = flow {
+        commitLogs: String,
+        onToken: suspend (String) -> Unit
+    ): Pair<String, Boolean> {
         val titleHeader = if (version.isNotBlank()) "# RELEASE v$version\n\n\n" else "# RELEASE\n\n\n"
-        emit(titleHeader)
+        onToken(titleHeader)
 
         val serverUrl = settingsService.state.serverUrl
         val modelId = settingsService.state.modelName.ifBlank { "default" }
@@ -37,20 +36,29 @@ Use clean Markdown formatting. Do not wrap the output in markdown code blocks. S
 
         val userPrompt = "Here are the git commit logs:\n\n$safeLogs"
 
-        val (_, loopDetected) = KoogLlmClient.generateStreaming(
+        val (rawResult, loopDetected) = KoogLlmClient.generateStreaming(
             baseUrlInput = serverUrl,
             modelId = modelId,
             systemPrompt = RELEASE_SYSTEM_PROMPT,
             userPrompt = userPrompt,
-            onToken = { token ->
-                emit(token)
-            }
+            onToken = onToken
         )
 
         if (loopDetected) {
-            emit("\n\n... [Repetition loop detected and halted] ...\n")
+            onToken("\n\n... [Repetition loop detected and halted] ...\n")
         }
 
-        emit("\n\n***AI release commit***\n")
+        val footer = "\n\n***AI release commit***\n"
+        onToken(footer)
+
+        val cleanBody = KoogLlmClient.sanitizeOutput(rawResult)
+            .removePrefix("# RELEASE")
+            .removePrefix("# RELEASE v$version")
+            .trimStart('\r', '\n')
+        val finalReport =
+            titleHeader + cleanBody + (if (loopDetected) "\n\n... [Repetition loop detected and halted] ...\n" else "") + footer
+
+        return Pair(finalReport, loopDetected)
     }
 }
+
