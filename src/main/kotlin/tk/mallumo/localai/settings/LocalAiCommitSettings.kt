@@ -39,7 +39,7 @@ Rules:
 - Output ONLY the raw commit message. Do NOT wrap it in markdown code blocks."""
 
 class LocalAiCommitState {
-    var serverUrl: String = "http://localhost:9090"
+    var serverUrl: String = "http://localhost:11434"
     var modelName: String = ""
     var reformatCode: Boolean = true
     var optimizeImports: Boolean = true

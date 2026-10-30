@@ -11,6 +11,7 @@ commit workflow with local LLM-assisted Conventional Commit generation powered b
 
 - **Multi-Level Git Hierarchy**: Automatically detects and separates changes across the main project and nested Git
   submodules.
+- **Hierarchical Directory Folding**: Collapses intermediate single-child folder paths for clean navigation.
 - **Color-Coded Status**:
     - Blue: Modified uncommitted files (`FileStatus.MODIFIED`)
     - Green: Newly added and unversioned files (`FileStatus.ADDED`)
@@ -19,33 +20,40 @@ commit workflow with local LLM-assisted Conventional Commit generation powered b
 - **Right-Click Context Menu**:
     - **Show Diff** (Native IntelliJ diff viewer)
     - **Show Diff in New Tab**
-    - **Rollback Changes**
+  - **Rollback Changes...**
     - **Add into VCS** (`git add`)
-    - **Delete**
+  - **Add to .gitignore** (Appends path pattern and immediately refreshes status)
+  - **Delete** (Safely deletes unversioned files via write command action)
     - **Jump to Source**
     - **Copy Path**
     - **Local History** (`LocalHistory.ShowHistory`)
 - **Selective Checkboxes**: Choose exactly which files, directories, or repositories to include in generation and
-  commit.
+  commit. Double-click any file to view its diff or open in editor.
+- **Automatic Refresh & Lifecycle Synchronization**: Subscribes to Git repository events, message bus updates, and VFS
+  changes without deprecated APIs.
 
 ### 2. Direct Local LLM Integration via JetBrains Koog (Right Panel)
 
-- **Zero-Service Overhead**: Directly connects to local endpoints (e.g. `http://localhost:9090` or
-  `http://localhost:11434`) via HTTP using Koog's OpenAI-compatible client.
+- **Zero-Service Overhead**: Directly connects to local endpoints (defaults to Ollama at `http://localhost:11434`, or
+  custom endpoints like LM Studio / vLLM / llama.cpp) via HTTP using Koog's OpenAI-compatible client.
 - **Dynamic Context Window Detection**: Queries local server properties (e.g. `/props`, `/v1/models`) to determine
   context limits (`contextWindowTokens`) and dynamically computes `maxDiffTokens` (~85% budget).
-- **Dynamic Token-Driven Chunker (No static file limits)**: Bottom-up directory tree chunking based strictly on token
+- **Dynamic Token-Driven Chunker**: Bottom-up directory tree chunking based strictly on token
   budgets, grouping changes logically.
-- **Real-Time Token Streaming**: Token-by-token live stream console with active **[Cancel Generation]** button.
+- **Real-Time Token Streaming**: Token-by-token live streaming for both chunk summaries and the final commit message,
+  with active **[Cancel Generation]** button.
 - **Repetition Loop Detector**: Real-time monitoring for repetitive loops from the local LLM, aborting loops and
   deduplicating lines.
-- **SVG Asset Optimization**: Automatically generates bullets for SVG files without wasting token context.
+- **Intelligent File & Media Filtering**: Automatically filters out binary files (images, audio, video, archives,
+  compiled artifacts, PDFs) from diff inspection, preventing token budget waste.
+- **SVG Asset Optimization**: Automatically generates descriptive summary bullets for SVG changes without polluting
+  token context with raw XML paths.
 
 ### 3. Pre-Commit Code Preparation
 
 Toggleable actions run before commit:
 
-- `[x] Rearrange Code`
+- `[ ] Rearrange Code`
 - `[x] Reformat Code`
 - `[x] Optimize Imports`
 
@@ -53,7 +61,7 @@ Toggleable actions run before commit:
 
 - Editable preview text area to refine the generated commit message.
 - 3 Primary action buttons:
-    - **[ Commit ]**: Stages selected files and executes commit.
+  - **[ Commit ]**: Formats code (if enabled), stages selected files, and executes commit only for the selected files.
     - **[ Regenerate ]**: Re-triggers generation with current selection.
     - **[ Cancel ]**: Returns to selection view.
 
@@ -67,11 +75,11 @@ Toggleable actions run before commit:
 ./gradlew buildPlugin
 ```
 
-The distribution archive is generated at `build/distributions/local-ai-commit-1.0.0.zip`.
+The distribution archive is generated at `build/distributions/local-ai-commit-x.x.x.zip`.
 
 ### Install in IntelliJ IDEA
 
 1. Open IntelliJ IDEA -> **Settings / Preferences** (`Ctrl + Alt + S`).
 2. Go to **Plugins** -> click the **Gear Icon (⚙)** -> **Install Plugin from Disk...**.
-3. Select `build/distributions/local-ai-commit-1.0.0.zip` and restart the IDE.
+3. Select `build/distributions/local-ai-commit-x.x.x.zip` and restart the IDE.
 4. The **AI Commit** tool window appears docked on the bottom bar.

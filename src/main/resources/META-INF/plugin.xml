@@ -6,14 +6,16 @@
     <description><![CDATA[
     <h3>Local AI Commit Generator for IntelliJ IDEA</h3>
     <p>
-      Generates structured, conventional commit messages using local LLMs via JetBrains Koog.
+      Generates structured, conventional commit messages using local LLMs (e.g. Ollama, LM Studio, vLLM, llama.cpp) via JetBrains Koog.
     </p>
     <ul>
-      <li><b>Multi-Root Git Support</b>: Full visualization and diff extraction for main projects and nested submodules.</li>
-      <li><b>Local LLM Direct Connection</b>: Connect directly to your local LLM (e.g. Llama/Ollama) with real-time streaming tokens.</li>
-      <li><b>Smart Token Budgeting & Chunking</b>: Bottom-up directory tree chunking based on dynamically computed context window limits.</li>
-      <li><b>Repetition Loop Detection</b>: Real-time loop prevention and deduplication.</li>
-      <li><b>Pre-Commit Actions</b>: Optional rearrange code, reformat code, and optimize imports before commit.</li>
+      <li><b>Multi-Root Git Support</b>: Full hierarchical visualization, directory collapsing, and diff extraction for main projects and nested submodules.</li>
+      <li><b>Local LLM Direct Connection</b>: Connect directly to your local LLM (defaults to Ollama on <code>http://localhost:11434</code>) with real-time streaming tokens.</li>
+      <li><b>Smart Token Budgeting & Chunking</b>: Bottom-up directory tree chunking based on dynamically computed context window limits with token streaming per chunk.</li>
+      <li><b>Repetition Loop Detection</b>: Real-time loop prevention and deduplication during token streaming.</li>
+      <li><b>Intelligent File & Media Filtering</b>: Automatically skips binary files, images, videos, audio, and archives while preserving relevant SVG assets.</li>
+      <li><b>Git Context Actions</b>: Show diff, jump to source, rollback changes, stage to VCS, add to <code>.gitignore</code>, delete untracked files, and copy file paths.</li>
+      <li><b>Pre-Commit Actions</b>: Optional rearrange code, reformat code, and optimize imports before committing.</li>
     </ul>
     ]]></description>
 
