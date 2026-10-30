@@ -1,4 +1,4 @@
-# Local AI Commit - IntelliJ IDEA Plugin
+# <img src="src/main/resources/icons/aiCommit.svg" width="32" height="32" alt="Local AI Commit Icon" valign="middle"/> Local AI Commit - IntelliJ IDEA Plugin
 
 **Local AI Commit** is an intelligent, bottom-docked IntelliJ IDEA tool window plugin that replaces the traditional
 commit workflow with local LLM-assisted Conventional Commit generation powered by **JetBrains Koog** (`ai.koog`).
@@ -116,4 +116,6 @@ The distribution archive is generated at `build/distributions/local-ai-commit-x.
 1. Open IntelliJ IDEA -> **Settings / Preferences** (`Ctrl + Alt + S`).
 2. Go to **Plugins** -> click the **Gear Icon (⚙)** -> **Install Plugin from Disk...**.
 3. Select `build/distributions/local-ai-commit-x.x.x.zip` and restart the IDE.
-4. The **AI Commit** tool window appears docked on the bottom bar.
+4. The **AI Commit** tool window
+   (<img src="src/main/resources/icons/aiCommit.svg" width="16" height="16" alt="AI Commit Icon" valign="middle"/>)
+   appears docked on the bottom bar.
