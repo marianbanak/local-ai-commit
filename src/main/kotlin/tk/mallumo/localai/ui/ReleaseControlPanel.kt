@@ -50,6 +50,7 @@ class ReleaseControlPanel(
     private var selectedVersionFile: VirtualFile? = null
     private var isCleanWorkingTree = true
     private var generationJob: Job? = null
+    private var repoUpdateJob: Job? = null
     private var currentGeneratedReport: String = ""
 
     // Card Layout container
@@ -371,7 +372,7 @@ class ReleaseControlPanel(
         for (repo in repos) {
             repoComboBox.addItem(repo)
         }
-        if (repos.isNotEmpty()) {
+        if (repos.isNotEmpty() && repoComboBox.itemCount > 0) {
             repoComboBox.selectedIndex = 0
             selectedRepository = repos.first()
             onRepositoryChanged()
@@ -391,6 +392,7 @@ class ReleaseControlPanel(
     }
 
     private fun onRepositoryChanged() {
+        repoUpdateJob?.cancel()
         val repo = selectedRepository
         versionFileComboBox.removeAllItems()
         sourceBranchComboBox.removeAllItems()
@@ -401,7 +403,7 @@ class ReleaseControlPanel(
         }
 
         // Populate Branches & Candidates asynchronously on Dispatchers.IO to avoid blocking EDT
-        cs.launch(Dispatchers.IO) {
+        repoUpdateJob = cs.launch(Dispatchers.IO) {
             val branches = gitChangesManager.getLocalBranches(repo)
             val currentBranch = repo.currentBranchName
             val candidates = gitChangesManager.detectCandidateVersionFiles(repo)
@@ -415,7 +417,7 @@ class ReleaseControlPanel(
                 }
                 if (currentBranch != null && branches.contains(currentBranch)) {
                     sourceBranchComboBox.selectedItem = currentBranch
-                } else if (branches.isNotEmpty()) {
+                } else if (sourceBranchComboBox.itemCount > 0) {
                     sourceBranchComboBox.selectedIndex = 0
                 }
 
@@ -425,9 +427,9 @@ class ReleaseControlPanel(
                     versionFileComboBox.addItem(relPath)
                 }
 
-                if (candidates.isNotEmpty()) {
+                if (versionFileComboBox.itemCount > 0) {
                     versionFileComboBox.selectedIndex = 0
-                    selectedVersionFile = candidates.first()
+                    selectedVersionFile = candidates.firstOrNull()
                     extractVersionFast(selectedVersionFile)
                 } else {
                     selectedVersionFile = null

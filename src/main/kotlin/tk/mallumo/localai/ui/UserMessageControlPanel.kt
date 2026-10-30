@@ -39,6 +39,7 @@ class UserMessageControlPanel(
     // Current State
     private var selectedRepository: GitRepository? = null
     private var generationJob: Job? = null
+    private var repoUpdateJob: Job? = null
 
     private var currentMarkdown: String = ""
     private var currentHtml: String = ""
@@ -303,7 +304,7 @@ class UserMessageControlPanel(
         for (repo in repos) {
             repoComboBox.addItem(repo)
         }
-        if (repos.isNotEmpty()) {
+        if (repos.isNotEmpty() && repoComboBox.itemCount > 0) {
             repoComboBox.selectedIndex = 0
             selectedRepository = repos.first()
             onRepositoryChanged()
@@ -323,10 +324,11 @@ class UserMessageControlPanel(
     }
 
     private fun onRepositoryChanged() {
+        repoUpdateJob?.cancel()
         val repo = selectedRepository ?: return
         branchComboBox.removeAllItems()
 
-        cs.launch(Dispatchers.IO) {
+        repoUpdateJob = cs.launch(Dispatchers.IO) {
             val branches = gitChangesManager.getLocalBranches(repo)
             val latestRelease = gitChangesManager.getLatestReleaseBranch(repo)
             val currentBranch = repo.currentBranchName
@@ -346,7 +348,7 @@ class UserMessageControlPanel(
                 } else if (currentBranch != null && branches.contains(currentBranch)) {
                     branchComboBox.selectedItem = currentBranch
                     formStatusLabel.text = "Selected current branch: $currentBranch"
-                } else if (branches.isNotEmpty()) {
+                } else if (branchComboBox.itemCount > 0) {
                     branchComboBox.selectedIndex = 0
                     formStatusLabel.text = "Ready"
                 } else {
