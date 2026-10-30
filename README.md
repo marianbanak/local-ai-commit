@@ -62,8 +62,35 @@ Toggleable actions run before commit:
 - Editable preview text area to refine the generated commit message.
 - 3 Primary action buttons:
   - **[ Commit ]**: Formats code (if enabled), stages selected files, and executes commit only for the selected files.
-    - **[ Regenerate ]**: Re-triggers generation with current selection.
-    - **[ Cancel ]**: Returns to selection view.
+  - **[ Regenerate ]**: Re-triggers generation with current selection.
+  - **[ Cancel ]**: Returns to selection view.
+
+### 5. Release Report Generation & Branch-Based Releases (Release Tab)
+
+The right panel features two tabs: **Commit** (default) and **Release**:
+
+- **Clean Working Tree Validation**: Enforces that all files in the target repository root are already committed or
+  ignored (0 pending changes). If dirty, warns the user and provides a one-click button to switch to the **Commit Tab**.
+- **Single Git Root Guidelines**: Enforces selecting exactly one repository root per release report.
+- **Always-Visible Repository Roots**: All repository roots and submodules stay visible in the left tree even when
+  containing 0 changes.
+- **Branch-Based Workflow**:
+  - **Source Branch**: Select the origin branch (defaults to the active branch, e.g. `master`).
+  - **Release Branch**: Default formatted as `release/{version}` (e.g. `release/1.0.0`), auto-populated from the
+    detected version.
+- **Smart Version File & Number Extraction**:
+  - Automatically identifies candidate version files (`libs.versions.toml`, `build.gradle.kts`, `build.gradle`,
+    `gradle.properties`, `package.json`, `pom.xml`, etc.).
+  - Fast pattern parsing with local AI fallback to detect current release version strings.
+- **Commit Range & Diff Modes**:
+  - **[x] Auto-detect branch diff split (merge-base)**: Compares branches by finding the fork point (`git merge-base`)
+    between the release branch and the source branch, collecting all commits in between.
+  - **Manual Mode**: Allows specifying an exact starting revision or commit hash from the source branch.
+- **Interactive Review & Confirmation**:
+  - Generates and streams the release report into an editable editor area.
+  - **[ Confirm Release ]**: Creates and switches to the release branch (`release/{version}`), commits the version file
+    with the release report, and updates repository state.
+  - **[ Cancel ]**: Discards the preview and returns to parameter configuration.
 
 ---
 

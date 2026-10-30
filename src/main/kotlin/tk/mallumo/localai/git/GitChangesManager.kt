@@ -188,7 +188,6 @@ class GitChangesManager(private val project: Project) {
         for (repo in repos) {
             val trackedInRepo = repoTrackedMap[repo] ?: emptyList()
             val unversionedInRepo = repoUnversionedMap[repo] ?: emptyList()
-            if (trackedInRepo.isEmpty() && unversionedInRepo.isEmpty()) continue
 
             trackedInRepo.sortedBy { it.relativePath }
             unversionedInRepo.sortedBy { it.relativePath }
@@ -360,4 +359,166 @@ class GitChangesManager(private val project: Project) {
                 false
             }
         }
+
+    fun findReleaseCommitTimestamp(
+        repository: GitRepository,
+        marker: String = "***AI release commit***"
+    ): Pair<String, String>? {
+        val handler = GitLineHandler(project, repository.root, GitCommand.LOG).apply {
+            addParameters("-1", "--fixed-strings", "--grep=$marker", "--format=%H %ci")
+        }
+        val result = Git.getInstance().runCommand(handler)
+        if (!result.success()) return null
+        val output = result.outputAsJoinedString.trim()
+        if (output.isBlank()) return null
+        val parts = output.split(" ", limit = 3)
+        return if (parts.size >= 2) {
+            Pair(parts[0], "${parts[1]} ${parts.getOrNull(2)?.substringBefore(" ") ?: "00:00:00"}")
+        } else {
+            null
+        }
+    }
+
+    fun getCommitLogsSince(repository: GitRepository, sinceDateTimeStr: String): String {
+        val handler = GitLineHandler(project, repository.root, GitCommand.LOG).apply {
+            addParameters(
+                "--since=$sinceDateTimeStr",
+                "--pretty=format:Commit: %h%nAuthor: %an%nDate: %ad%nSubject: %s%nBody: %b%n---"
+            )
+        }
+        val result = Git.getInstance().runCommand(handler)
+        return if (result.success()) result.outputAsJoinedString.trim() else ""
+    }
+
+    fun getCommitLogsForRevision(repository: GitRepository, revision: String): String {
+        val cleanRev = revision.trim()
+        val revArg =
+            if (cleanRev.contains("..")) cleanRev else if (cleanRev.startsWith("-")) cleanRev else "$cleanRev..HEAD"
+        val handler = GitLineHandler(project, repository.root, GitCommand.LOG).apply {
+            addParameters(
+                revArg,
+                "--pretty=format:Commit: %h%nAuthor: %an%nDate: %ad%nSubject: %s%nBody: %b%n---"
+            )
+        }
+        val result = Git.getInstance().runCommand(handler)
+        return if (result.success()) result.outputAsJoinedString.trim() else ""
+    }
+
+    fun getCommitDate(repository: GitRepository, revision: String): String? {
+        val handler = GitLineHandler(project, repository.root, GitCommand.LOG).apply {
+            addParameters("-1", "--format=%ci", revision.trim())
+        }
+        val result = Git.getInstance().runCommand(handler)
+        return if (result.success()) result.outputAsJoinedString.trim().ifBlank { null } else null
+    }
+
+    fun isRepositoryClean(repository: GitRepository): Boolean {
+        val changeListManager = ChangeListManager.getInstance(project)
+        val allChanges = changeListManager.allChanges
+        val unversionedFiles = changeListManager.unversionedFilesPaths
+        val repoManager = GitRepositoryManager.getInstance(project)
+
+        val hasChanges = allChanges.any { change ->
+            val fp = change.afterRevision?.file ?: change.beforeRevision?.file
+            if (fp != null) {
+                val r = repoManager.getRepositoryForFileQuick(fp) ?: repoManager.getRepositoryForFile(fp)
+                r == repository || fp.path.startsWith("${repository.root.path}/")
+            } else false
+        }
+        if (hasChanges) return false
+
+        val hasUnversioned = unversionedFiles.any { fp ->
+            if (changeListManager.isIgnoredFile(fp)) false
+            else {
+                val r = repoManager.getRepositoryForFileQuick(fp) ?: repoManager.getRepositoryForFile(fp)
+                r == repository || fp.path.startsWith("${repository.root.path}/")
+            }
+        }
+        return !hasUnversioned
+    }
+
+    fun getLocalBranches(repository: GitRepository): List<String> {
+        val handler = GitLineHandler(project, repository.root, GitCommand.BRANCH).apply {
+            addParameters("--list")
+        }
+        val result = Git.getInstance().runCommand(handler)
+        if (!result.success()) return emptyList()
+        return result.output.map { line ->
+            line.trim().removePrefix("*").trim()
+        }.filter { it.isNotBlank() }
+    }
+
+    fun getMergeBase(repository: GitRepository, branch1: String, branch2: String): String? {
+        val handler = GitLineHandler(project, repository.root, GitCommand.MERGE_BASE).apply {
+            addParameters(branch1.trim(), branch2.trim())
+        }
+        val result = Git.getInstance().runCommand(handler)
+        if (!result.success()) return null
+        return result.outputAsJoinedString.trim().ifBlank { null }
+    }
+
+    fun getCommitLogsBetween(repository: GitRepository, fromRev: String, toRev: String): String {
+        val range = "${fromRev.trim()}..${toRev.trim()}"
+        val handler = GitLineHandler(project, repository.root, GitCommand.LOG).apply {
+            addParameters(
+                range,
+                "--pretty=format:Commit: %h%nAuthor: %an%nDate: %ad%nSubject: %s%nBody: %b%n---"
+            )
+        }
+        val result = Git.getInstance().runCommand(handler)
+        return if (result.success()) result.outputAsJoinedString.trim() else ""
+    }
+
+    fun createAndCheckoutBranch(repository: GitRepository, branchName: String, startPoint: String? = null): Boolean {
+        val cleanBranch = branchName.trim()
+        val existingBranches = getLocalBranches(repository)
+        val handler = if (existingBranches.contains(cleanBranch)) {
+            GitLineHandler(project, repository.root, GitCommand.CHECKOUT).apply {
+                addParameters(cleanBranch)
+            }
+        } else {
+            GitLineHandler(project, repository.root, GitCommand.CHECKOUT).apply {
+                addParameters("-b", cleanBranch)
+                if (!startPoint.isNullOrBlank()) {
+                    addParameters(startPoint.trim())
+                }
+            }
+        }
+        val result = Git.getInstance().runCommand(handler)
+        repository.update()
+        return result.success()
+    }
+
+    fun detectCandidateVersionFiles(repository: GitRepository): List<VirtualFile> {
+        val root = repository.root
+        val candidates = mutableListOf<VirtualFile>()
+
+        fun scan(file: VirtualFile, depth: Int = 0) {
+            if (depth > 3) return
+            if (file.isDirectory) {
+                val name = file.name
+                if (name == ".git" || name == "build" || name == ".gradle" || name == "node_modules" || name == ".idea") return
+                for (child in file.children) {
+                    scan(child, depth + 1)
+                }
+            } else {
+                val name = file.name.lowercase()
+                if (name.endsWith(".versions.toml") ||
+                    name == "libs.versions.toml" ||
+                    name == "build.gradle.kts" ||
+                    name == "build.gradle" ||
+                    name == "gradle.properties" ||
+                    name == "package.json" ||
+                    name == "pom.xml" ||
+                    name == "version.txt" ||
+                    name == "version"
+                ) {
+                    candidates.add(file)
+                }
+            }
+        }
+
+        scan(root)
+        return candidates
+    }
 }

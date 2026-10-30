@@ -1,8 +1,10 @@
 package tk.mallumo.localai.ui
 
+import com.intellij.icons.AllIcons
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.project.Project
 import com.intellij.ui.JBSplitter
+import com.intellij.ui.components.JBTabbedPane
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -20,6 +22,8 @@ class AICommitMainPanel(
 
     private val treePanel: ChangesTreePanel
     private val aiControlPanel: AiControlPanel
+    private val releaseControlPanel: ReleaseControlPanel
+    private val tabbedPane = JBTabbedPane()
     private val splitter = JBSplitter(false, 0.40f)
 
     init {
@@ -32,15 +36,32 @@ class AICommitMainPanel(
             }
         )
 
+        releaseControlPanel = ReleaseControlPanel(
+            project = project,
+            gitChangesManager = gitChangesManager,
+            cs = scope,
+            onReleaseCommitted = {
+                treePanel.forceFullRefresh()
+            },
+            onSwitchToCommitTab = {
+                tabbedPane.selectedIndex = 0
+            }
+        )
+
         treePanel = ChangesTreePanel(
             project = project,
             gitChangesManager = gitChangesManager,
             cs = scope,
             onSelectionChanged = { selectedFiles ->
                 aiControlPanel.updateSelectionState(selectedFiles)
+                val repo = treePanel.getSelectedRepository()
+                if (repo != null) {
+                    releaseControlPanel.selectRepository(repo)
+                }
             },
             onRefreshRequested = {
                 aiControlPanel.clearCaches()
+                releaseControlPanel.reloadRepositories()
             }
         )
 
@@ -48,8 +69,18 @@ class AICommitMainPanel(
             treePanel.refreshChanges()
         }
 
+        // Add tabs to right panel: 1. Commit (default), 2. Release
+        tabbedPane.addTab("Commit", AllIcons.Actions.Commit, aiControlPanel)
+        tabbedPane.addTab("Release", AllIcons.Actions.ShowAsTree, releaseControlPanel)
+        tabbedPane.selectedIndex = 0
+        tabbedPane.addChangeListener {
+            if (tabbedPane.selectedIndex == 1) {
+                releaseControlPanel.updateGuideline()
+            }
+        }
+
         splitter.firstComponent = treePanel
-        splitter.secondComponent = aiControlPanel
+        splitter.secondComponent = tabbedPane
         splitter.dividerWidth = 4
 
         add(splitter, BorderLayout.CENTER)

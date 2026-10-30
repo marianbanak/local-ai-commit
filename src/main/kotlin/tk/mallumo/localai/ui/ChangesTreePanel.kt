@@ -406,7 +406,6 @@ class ChangesTreePanel(
             rootNode.removeAllChildren()
 
             for (group in groups) {
-                if (group.files.isEmpty()) continue
                 val groupNode = CheckedTreeNode(group)
 
                 // 1. Tracked Changes section ("Changes")
@@ -490,6 +489,27 @@ class ChangesTreePanel(
         }
         collect(rootNode)
         return list
+    }
+
+    fun getSelectedRepository(): git4idea.repo.GitRepository? {
+        val paths = tree.selectionPaths
+        if (!paths.isNullOrEmpty()) {
+            val selectedRepos = paths.mapNotNull { path ->
+                val node = path.lastPathComponent as? CheckedTreeNode ?: return@mapNotNull null
+                when (val obj = node.userObject) {
+                    is GitRepoGroup -> obj.repository
+                    is GitFileItem -> obj.repository
+                    else -> null
+                }
+            }.distinct()
+            if (selectedRepos.size == 1) return selectedRepos.first()
+        }
+
+        // Fallback to checked items
+        val checkedRepos = getSelectedFiles().map { it.repository }.distinct()
+        if (checkedRepos.size == 1) return checkedRepos.first()
+
+        return null
     }
 
     private fun getSelectedNodeItems(): List<GitFileItem> {
