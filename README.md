@@ -67,6 +67,40 @@ Toggleable actions run before commit:
 
 ---
 
+## Tested Local LLM Configuration (8GB VRAM)
+
+The plugin has been fully tested and validated on an **8GB VRAM** setup using `llama-server` (llama.cpp) with an MoE
+thinking model and high context window (128k). Below is an example startup command tailored for fast inference,
+quantized KV cache, speculative ngram decoding, and CPU offloading of token embeddings:
+
+```bash
+llama-server \
+  -m Mellum2.1-12B-A2.5B-Thinking-MXFP4_MOE.gguf \
+  -ngl 99 \
+  -ot "token_embd\\.weight=CPU" \
+  --no-mmap \
+  -np 1 \
+  -fa on \
+  -ctk q4_0 -ctv q4_0 \
+  -c 131072 \
+  -b 1024 -ub 256 \
+  --spec-type ngram-mod \
+  --spec-ngram-mod-n-max 8 \
+  --reasoning-format deepseek \
+  --jinja \
+  --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.05 \
+  --port 11434
+```
+
+> **Key Flags Overview:**
+> - `-c 131072`: Generous 128k context window to ingest extensive code diffs.
+> - `-ctk q4_0 -ctv q4_0`: 4-bit KV cache quantization to fit 128k context comfortably within 8GB VRAM.
+> - `-ot "token_embd\\.weight=CPU"`: Keeps the embedding table in system RAM to preserve dedicated VRAM for model
+    layers.
+> - `--port 11434`: Matches the plugin's default connection endpoint (`http://localhost:11434`).
+
+---
+
 ## Installation & Building
 
 ### Build Plugin Package
