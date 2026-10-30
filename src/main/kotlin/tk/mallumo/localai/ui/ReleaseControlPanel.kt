@@ -728,6 +728,7 @@ class ReleaseControlPanel(
         val version = detectedVersionField.text.trim()
         val releaseBranch = releaseBranchField.text.trim().ifBlank { "release/$version" }
         val sourceBranch = sourceBranchComboBox.selectedItem as? String ?: repo.currentBranchName ?: "HEAD"
+        val originalBranch = repo.currentBranchName ?: sourceBranch
         val report = previewEditor.text.trim()
 
         val commitTitle =
@@ -735,7 +736,7 @@ class ReleaseControlPanel(
         val fullCommitMessage = "$commitTitle\n\n$report"
 
         val confirmMsg =
-            "Create and switch to branch '$releaseBranch' from '$sourceBranch' and commit release report?\n\nTarget File: ${versionFile?.name ?: "Release Report"}"
+            "Create release branch '$releaseBranch' from '$sourceBranch', commit release report, and return to '$originalBranch'?\n\nTarget File: ${versionFile?.name ?: "Release Report"}"
         val proceed = Messages.showYesNoDialog(
             project,
             confirmMsg,
@@ -784,6 +785,12 @@ class ReleaseControlPanel(
                     throw RuntimeException("Commit failed: ${commitRes.errorOutputAsJoinedString}")
                 }
 
+                // 4. Return back to the original branch
+                val switchedBack = gitChangesManager.checkoutBranch(repo, originalBranch)
+                if (!switchedBack) {
+                    LOG.warn("Could not switch back to original branch '$originalBranch'")
+                }
+
                 repo.update()
                 if (versionFile != null) {
                     VfsUtil.markDirtyAndRefresh(true, true, true, versionFile, repo.root)
@@ -794,15 +801,16 @@ class ReleaseControlPanel(
                     NotificationGroupManager.getInstance()
                         .getNotificationGroup("Local AI Commit")
                         .createNotification(
-                            "Release Branch Created & Committed",
-                            "Release branch '$releaseBranch' created and committed successfully.",
+                            "Release Committed",
+                            "Release branch '$releaseBranch' created and committed. Returned to '$originalBranch'.",
                             NotificationType.INFORMATION
                         )
                         .notify(project)
 
                     cardLayout.show(cardContainer, "FORM")
-                    formStatusLabel.text = "Release '$releaseBranch' created and committed successfully."
+                    formStatusLabel.text = "Release '$releaseBranch' committed. Returned to '$originalBranch'."
                     formStatusLabel.foreground = JBColor(0x2E7D32, 0x81C784)
+                    onRepositoryChanged()
                     onReleaseCommitted()
                 }
             } catch (e: Exception) {

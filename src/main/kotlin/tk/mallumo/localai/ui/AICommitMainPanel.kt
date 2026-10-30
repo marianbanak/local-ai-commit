@@ -23,6 +23,7 @@ class AICommitMainPanel(
     private val treePanel: ChangesTreePanel
     private val aiControlPanel: AiControlPanel
     private val releaseControlPanel: ReleaseControlPanel
+    private val userMessageControlPanel: UserMessageControlPanel
     private val tabbedPane = JBTabbedPane()
     private val splitter = JBSplitter(false, 0.40f)
 
@@ -48,6 +49,12 @@ class AICommitMainPanel(
             }
         )
 
+        userMessageControlPanel = UserMessageControlPanel(
+            project = project,
+            gitChangesManager = gitChangesManager,
+            cs = scope
+        )
+
         treePanel = ChangesTreePanel(
             project = project,
             gitChangesManager = gitChangesManager,
@@ -57,11 +64,13 @@ class AICommitMainPanel(
                 val repo = treePanel.getSelectedRepository()
                 if (repo != null) {
                     releaseControlPanel.selectRepository(repo)
+                    userMessageControlPanel.selectRepository(repo)
                 }
             },
             onRefreshRequested = {
                 aiControlPanel.clearCaches()
                 releaseControlPanel.reloadRepositories()
+                userMessageControlPanel.reloadRepositories()
             }
         )
 
@@ -69,9 +78,10 @@ class AICommitMainPanel(
             treePanel.refreshChanges()
         }
 
-        // Add tabs to right panel: 1. Commit (default), 2. Release
+        // Add tabs to right panel: 1. Commit (default), 2. Release, 3. User Message
         tabbedPane.addTab("Commit", AllIcons.Actions.Commit, aiControlPanel)
         tabbedPane.addTab("Release", AllIcons.Actions.ShowAsTree, releaseControlPanel)
+        tabbedPane.addTab("User Message", AllIcons.General.User, userMessageControlPanel)
         tabbedPane.selectedIndex = 0
         tabbedPane.addChangeListener {
             if (tabbedPane.selectedIndex == 1) {

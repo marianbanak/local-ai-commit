@@ -553,6 +553,56 @@ class GitChangesManager(private val project: Project) {
         return result.success()
     }
 
+    fun checkoutBranch(repository: GitRepository, branchName: String): Boolean {
+        val cleanBranch = branchName.trim()
+        val handler = GitLineHandler(project, repository.root, GitCommand.CHECKOUT).apply {
+            addParameters(cleanBranch)
+        }
+        val result = Git.getInstance().runCommand(handler)
+        repository.update()
+        return result.success()
+    }
+
+    fun getLatestReleaseBranch(repository: GitRepository): String? {
+        val branches = getLocalBranches(repository)
+        val releaseBranches = branches.filter {
+            it.startsWith("release/", ignoreCase = true) || it.startsWith("release-", ignoreCase = true)
+        }
+        if (releaseBranches.isEmpty()) return null
+        return releaseBranches.sortedWith(Comparator { b1, b2 ->
+            b2.compareTo(b1, ignoreCase = true)
+        }).firstOrNull()
+    }
+
+    fun getBranchHeadCommitMessage(repository: GitRepository, branchName: String): String {
+        val handler = GitLineHandler(project, repository.root, GitCommand.LOG).apply {
+            addParameters("-1", "--pretty=format:%B", branchName.trim())
+        }
+        val result = Git.getInstance().runCommand(handler)
+        return if (result.success()) result.outputAsJoinedString.trim() else ""
+    }
+
+    fun getBranchNotesForUser(repository: GitRepository, branchName: String): String {
+        val headMsg = getBranchHeadCommitMessage(repository, branchName)
+        if (headMsg.contains("# RELEASE", ignoreCase = true) || headMsg.contains(
+                "***AI release commit***",
+                ignoreCase = true
+            )
+        ) {
+            return headMsg
+        }
+        val handler = GitLineHandler(project, repository.root, GitCommand.LOG).apply {
+            addParameters(
+                "-20",
+                "--pretty=format:Commit: %h%nDate: %ad%nSubject: %s%nBody: %b%n---",
+                branchName.trim()
+            )
+        }
+        val result = Git.getInstance().runCommand(handler)
+        val logs = if (result.success()) result.outputAsJoinedString.trim() else ""
+        return if (headMsg.isNotBlank()) "$headMsg\n\n$logs" else logs
+    }
+
     fun detectCandidateVersionFiles(repository: GitRepository): List<VirtualFile> {
         val root = repository.root
         val candidates = mutableListOf<VirtualFile>()
