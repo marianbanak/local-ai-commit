@@ -89,7 +89,7 @@ class ReleaseControlPanel(
     private val revisionPanel = JPanel(BorderLayout(6, 0))
     private val revisionField = JBTextField(16)
     private val revisionHelpLabel =
-        JBLabel("Enter revision/commit hash from source branch to start release from:").apply {
+        JBLabel("Paste the commit hash/revision from source branch where release history begins (inclusive):").apply {
             font = font.deriveFont(Font.PLAIN, 10f)
             foreground = JBColor.GRAY
         }
@@ -324,35 +324,43 @@ class ReleaseControlPanel(
             return
         }
 
-        // 1. Populate Branches
-        val branches = gitChangesManager.getLocalBranches(repo)
-        val currentBranch = repo.currentBranchName
-        for (b in branches) {
-            sourceBranchComboBox.addItem(b)
-        }
-        if (currentBranch != null && branches.contains(currentBranch)) {
-            sourceBranchComboBox.selectedItem = currentBranch
-        } else if (branches.isNotEmpty()) {
-            sourceBranchComboBox.selectedIndex = 0
-        }
+        // 1. Populate Branches asynchronously on Dispatchers.IO to avoid blocking EDT
+        cs.launch(Dispatchers.IO) {
+            val branches = gitChangesManager.getLocalBranches(repo)
+            val currentBranch = repo.currentBranchName
+            val candidates = gitChangesManager.detectCandidateVersionFiles(repo)
 
-        // 2. Discover Version Files
-        val candidates = gitChangesManager.detectCandidateVersionFiles(repo)
-        for (file in candidates) {
-            val relPath = VfsUtil.getRelativePath(file, repo.root) ?: file.name
-            versionFileComboBox.addItem(relPath)
-        }
+            ApplicationManager.getApplication().invokeLater {
+                if (selectedRepository != repo) return@invokeLater
 
-        if (candidates.isNotEmpty()) {
-            versionFileComboBox.selectedIndex = 0
-            selectedVersionFile = candidates.first()
-            extractVersionFast(selectedVersionFile)
-        } else {
-            selectedVersionFile = null
-            updateDefaultReleaseBranch()
-        }
+                sourceBranchComboBox.removeAllItems()
+                for (b in branches) {
+                    sourceBranchComboBox.addItem(b)
+                }
+                if (currentBranch != null && branches.contains(currentBranch)) {
+                    sourceBranchComboBox.selectedItem = currentBranch
+                } else if (branches.isNotEmpty()) {
+                    sourceBranchComboBox.selectedIndex = 0
+                }
 
-        updateGuideline()
+                versionFileComboBox.removeAllItems()
+                for (file in candidates) {
+                    val relPath = VfsUtil.getRelativePath(file, repo.root) ?: file.name
+                    versionFileComboBox.addItem(relPath)
+                }
+
+                if (candidates.isNotEmpty()) {
+                    versionFileComboBox.selectedIndex = 0
+                    selectedVersionFile = candidates.first()
+                    extractVersionFast(selectedVersionFile)
+                } else {
+                    selectedVersionFile = null
+                    updateDefaultReleaseBranch()
+                }
+
+                updateGuideline()
+            }
+        }
     }
 
     private fun updateDefaultReleaseBranch() {
@@ -500,6 +508,23 @@ class ReleaseControlPanel(
         val sourceBranch = sourceBranchComboBox.selectedItem as? String ?: repo.currentBranchName ?: "HEAD"
         val releaseBranch = releaseBranchField.text.trim()
 
+        if (releaseBranch.isBlank()) {
+            Messages.showWarningDialog(project, "Please specify a release branch name.", "Release Branch Missing")
+            return
+        }
+
+        // Check if release branch already exists before generating report
+        if (gitChangesManager.branchOrTagExists(repo, releaseBranch)) {
+            Messages.showWarningDialog(
+                project,
+                "The release branch '$releaseBranch' already exists in '${repo.root.name}'.\n\n" +
+                        "Please update the version number in your version file (e.g. bump patch or minor version) " +
+                        "or specify a unique release branch name before proceeding.",
+                "Release Branch Already Exists"
+            )
+            return
+        }
+
         statusLabel.text = "Resolving git commit differences between branches..."
         statusLabel.foreground = JBColor.BLUE
         generateBtn.isEnabled = false
@@ -511,10 +536,32 @@ class ReleaseControlPanel(
 
         generationJob = cs.launch(Dispatchers.IO) {
             try {
+                // Check if this is the first release (no previous release branch or marker detected)
+                val isAuto = autoCompareBranchesCheckbox.isSelected
+                if (isAuto && !gitChangesManager.hasPreviousRelease(repo, releaseBranch, sourceBranch)) {
+                    val rootCommit = gitChangesManager.getRootCommit(repo)
+                    ApplicationManager.getApplication().invokeLater {
+                        autoCompareBranchesCheckbox.isSelected = false
+                        revisionPanel.isVisible = true
+                        if (!rootCommit.isNullOrBlank()) {
+                            revisionField.text = rootCommit
+                        }
+                        statusLabel.text =
+                            "No previous release detected. Please verify or paste the starting commit revision."
+                        statusLabel.foreground = JBColor(0xE65100, 0xFFB74D) // Amber warning
+                        generateBtn.isEnabled = true
+                        cancelGenBtn.isVisible = false
+                    }
+                    return@launch
+                }
+
                 val commitLogs = resolveCommitLogs(repo, sourceBranch, releaseBranch)
                 if (commitLogs.isBlank()) {
                     ApplicationManager.getApplication().invokeLater {
-                        statusLabel.text = "No commits found between branches for release."
+                        autoCompareBranchesCheckbox.isSelected = false
+                        revisionPanel.isVisible = true
+                        statusLabel.text =
+                            "No commits found. Please paste revision number of branch where commit history starts."
                         statusLabel.foreground = JBColor.RED
                         generateBtn.isEnabled = true
                         cancelGenBtn.isVisible = false
@@ -587,7 +634,7 @@ class ReleaseControlPanel(
         } else {
             val rev = revisionField.text.trim()
             return if (rev.isNotBlank()) {
-                gitChangesManager.getCommitLogsBetween(repo, rev, sourceBranch)
+                gitChangesManager.getCommitLogsBetween(repo, rev, sourceBranch, inclusiveFrom = true)
             } else {
                 gitChangesManager.getCommitLogsForRevision(repo, sourceBranch)
             }
@@ -650,6 +697,16 @@ class ReleaseControlPanel(
             Messages.getQuestionIcon()
         )
         if (proceed != Messages.YES) return
+
+        if (gitChangesManager.branchOrTagExists(repo, releaseBranch)) {
+            Messages.showWarningDialog(
+                project,
+                "The release branch '$releaseBranch' already exists in '${repo.root.name}'.\n\n" +
+                        "Please update the version number or specify a different branch name before proceeding.",
+                "Release Branch Already Exists"
+            )
+            return
+        }
 
         cs.launch(Dispatchers.IO) {
             try {

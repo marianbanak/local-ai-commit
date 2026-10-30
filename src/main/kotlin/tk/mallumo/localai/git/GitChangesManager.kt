@@ -437,7 +437,32 @@ class GitChangesManager(private val project: Project) {
         return !hasUnversioned
     }
 
+    fun branchOrTagExists(repository: GitRepository, refName: String): Boolean {
+        val clean = refName.trim()
+        if (clean.isBlank()) return false
+        val localBranches = getLocalBranches(repository)
+        if (localBranches.any { it.equals(clean, ignoreCase = true) }) return true
+
+        // Check remote branches or tags via rev-parse
+        val handler = GitLineHandler(project, repository.root, GitCommand.REV_PARSE).apply {
+            addParameters("--verify", "refs/heads/$clean")
+        }
+        if (Git.getInstance().runCommand(handler).success()) return true
+
+        val tagHandler = GitLineHandler(project, repository.root, GitCommand.REV_PARSE).apply {
+            addParameters("--verify", "refs/tags/$clean")
+        }
+        if (Git.getInstance().runCommand(tagHandler).success()) return true
+
+        val tagVHandler = GitLineHandler(project, repository.root, GitCommand.REV_PARSE).apply {
+            addParameters("--verify", "refs/tags/v$clean")
+        }
+        return Git.getInstance().runCommand(tagVHandler).success()
+    }
+
     fun getLocalBranches(repository: GitRepository): List<String> {
+        val branches = repository.branches.localBranches.map { it.name }
+        if (branches.isNotEmpty()) return branches
         val handler = GitLineHandler(project, repository.root, GitCommand.BRANCH).apply {
             addParameters("--list")
         }
@@ -446,6 +471,24 @@ class GitChangesManager(private val project: Project) {
         return result.output.map { line ->
             line.trim().removePrefix("*").trim()
         }.filter { it.isNotBlank() }
+    }
+
+    fun getRootCommit(repository: GitRepository): String? {
+        val handler = GitLineHandler(project, repository.root, GitCommand.REV_LIST).apply {
+            addParameters("--max-parents=0", "HEAD")
+        }
+        val result = Git.getInstance().runCommand(handler)
+        if (!result.success()) return null
+        return result.output.firstOrNull { it.isNotBlank() }?.trim()
+    }
+
+    fun hasPreviousRelease(repository: GitRepository, releaseBranch: String, sourceBranch: String): Boolean {
+        val existingBranches = getLocalBranches(repository)
+        if (existingBranches.contains(releaseBranch.trim())) {
+            val base = getMergeBase(repository, releaseBranch, sourceBranch)
+            if (!base.isNullOrBlank()) return true
+        }
+        return findReleaseCommitTimestamp(repository) != null
     }
 
     fun getMergeBase(repository: GitRepository, branch1: String, branch2: String): String? {
@@ -457,8 +500,29 @@ class GitChangesManager(private val project: Project) {
         return result.outputAsJoinedString.trim().ifBlank { null }
     }
 
-    fun getCommitLogsBetween(repository: GitRepository, fromRev: String, toRev: String): String {
-        val range = "${fromRev.trim()}..${toRev.trim()}"
+    fun getCommitLogsBetween(
+        repository: GitRepository,
+        fromRev: String,
+        toRev: String,
+        inclusiveFrom: Boolean = false
+    ): String {
+        val cleanFrom = fromRev.trim()
+        val cleanTo = toRev.trim()
+        val range = if (inclusiveFrom) {
+            // Check if fromRev has a parent commit
+            val parentCheck = GitLineHandler(project, repository.root, GitCommand.REV_PARSE).apply {
+                addParameters("--verify", "$cleanFrom~1")
+            }
+            val parentRes = Git.getInstance().runCommand(parentCheck)
+            if (parentRes.success() && parentRes.outputAsJoinedString.isNotBlank()) {
+                "${cleanFrom}~1..$cleanTo"
+            } else {
+                // It's the root commit, all commits reachable from cleanTo
+                cleanTo
+            }
+        } else {
+            "$cleanFrom..$cleanTo"
+        }
         val handler = GitLineHandler(project, repository.root, GitCommand.LOG).apply {
             addParameters(
                 range,
