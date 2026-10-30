@@ -104,7 +104,7 @@ class ReleaseControlPanel(
         foreground = JBColor.GRAY
     }
 
-    private val generateBtn = JButton("⚡ Generate Release Report").apply {
+    private val generateBtn = JButton("Generate Release Report").apply {
         font = font.deriveFont(Font.BOLD, 13f)
         putClientProperty(DarculaButtonUI.DEFAULT_STYLE_KEY, true)
         putClientProperty("JButton.styleDefault", true)
@@ -132,7 +132,7 @@ class ReleaseControlPanel(
         wrapStyleWord = true
         font = Font(Font.MONOSPACED, Font.PLAIN, 12)
     }
-    private val confirmReleaseBtn = JButton("✓ Confirm Release", AllIcons.Actions.Checked).apply {
+    private val confirmReleaseBtn = JButton("Confirm Release", AllIcons.Actions.Checked).apply {
         font = font.deriveFont(Font.BOLD, 13f)
         putClientProperty(DarculaButtonUI.DEFAULT_STYLE_KEY, true)
         putClientProperty("JButton.styleDefault", true)
@@ -140,7 +140,7 @@ class ReleaseControlPanel(
     }
     private val regenerateBtn = JButton("Regenerate", AllIcons.Actions.Refresh)
     private val cancelPreviewBtn = JButton("Cancel", AllIcons.Actions.Cancel)
-    private val copyBtn = JButton("📋 Copy Report", AllIcons.Actions.Copy)
+    private val copyBtn = JButton("Copy Report", AllIcons.Actions.Copy)
 
     init {
         border = JBUI.Borders.empty(6)
@@ -713,9 +713,9 @@ class ReleaseControlPanel(
         if (text.isNotBlank()) {
             val clipboard = Toolkit.getDefaultToolkit().systemClipboard
             clipboard.setContents(StringSelection(text), null)
-            copyBtn.text = "✓ Copied!"
+            copyBtn.text = "Copied!"
             val resetTimer = Timer(2000) { _ ->
-                copyBtn.text = "📋 Copy Report"
+                copyBtn.text = "Copy Report"
             }
             resetTimer.isRepeats = false
             resetTimer.start()
