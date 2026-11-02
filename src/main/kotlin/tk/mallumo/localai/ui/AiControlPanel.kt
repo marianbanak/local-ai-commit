@@ -18,6 +18,7 @@ import tk.mallumo.localai.git.GitFileItem
 import tk.mallumo.localai.llm.CommitStrategy
 import tk.mallumo.localai.llm.KoogLlmClient
 import tk.mallumo.localai.settings.LocalAiCommitSettingsService
+import tk.mallumo.localai.settings.LocalAiUrlStorage
 import java.awt.*
 import javax.swing.JButton
 import javax.swing.JPanel
@@ -48,7 +49,7 @@ class AiControlPanel(
 
     // 1. Setup / Disconnected Card
     private val setupCard = JPanel(GridBagLayout())
-    private val urlField = JBTextField(settings.serverUrl, 25)
+    private val urlField = JBTextField(LocalAiUrlStorage.loadLastUsedUrl(settings.serverUrl), 25)
     private val modelField = JBTextField(settings.modelName, 20)
     private val connectBtn = JButton("Connect & Verify")
     private val connectionStatusLabel = JBLabel("Enter local LLM address to connect", SwingConstants.CENTER)
@@ -117,6 +118,28 @@ class AiControlPanel(
         formPanel.add(JBLabel("Model ID (optional):"))
         formPanel.add(modelField)
         setupCard.add(formPanel, gbc)
+
+        urlField.document.addDocumentListener(object : javax.swing.event.DocumentListener {
+            override fun insertUpdate(e: javax.swing.event.DocumentEvent?) {
+                persistUrl()
+            }
+
+            override fun removeUpdate(e: javax.swing.event.DocumentEvent?) {
+                persistUrl()
+            }
+
+            override fun changedUpdate(e: javax.swing.event.DocumentEvent?) {
+                persistUrl()
+            }
+
+            private fun persistUrl() {
+                val u = urlField.text.trim()
+                if (u.isNotBlank()) {
+                    LocalAiUrlStorage.saveLastUsedUrl(u)
+                    settings.serverUrl = u
+                }
+            }
+        })
 
         gbc.gridy++
         connectBtn.addActionListener {
@@ -266,6 +289,11 @@ class AiControlPanel(
         val url = urlField.text.trim()
         val model = modelField.text.trim()
 
+        if (url.isNotBlank()) {
+            LocalAiUrlStorage.saveLastUsedUrl(url)
+            settings.serverUrl = url
+        }
+
         ApplicationManager.getApplication().invokeLater {
             connectBtn.isEnabled = false
             connectionStatusLabel.text = "Checking connection to $url..."
@@ -276,6 +304,8 @@ class AiControlPanel(
 
         ApplicationManager.getApplication().invokeLater {
             connectBtn.isEnabled = true
+            urlField.text = LocalAiUrlStorage.loadLastUsedUrl(url)
+
             if (result.success) {
                 isConnected = true
                 settings.serverUrl = url
@@ -290,27 +320,38 @@ class AiControlPanel(
                 updateSelectionState(currentSelectedFiles)
             } else {
                 isConnected = false
-                connectionStatusLabel.text = result.message
+                val lastUrl = LocalAiUrlStorage.loadLastUsedUrl(url)
+                connectionStatusLabel.text =
+                    "<html><b>Server offline / unreachable.</b><br>${result.message}<br><span style='color: gray;'>Last used URL: $lastUrl</span></html>"
                 connectionStatusLabel.foreground = JBColor.RED
+                cardLayout.show(cardContainer, "SETUP")
                 if (!silent) {
-                    Messages.showErrorDialog(project, result.message, "Connection Failed")
+                    Messages.showErrorDialog(
+                        project,
+                        "${result.message}\n\nLast used URL: $lastUrl",
+                        "Connection Failed"
+                    )
                 }
             }
         }
     }
 
     private fun refreshConnection() {
+        val lastSavedUrl = LocalAiUrlStorage.loadLastUsedUrl(settings.serverUrl)
+        settings.serverUrl = lastSavedUrl
+        urlField.text = lastSavedUrl
+
         cs.launch {
             ApplicationManager.getApplication().invokeLater {
                 refreshBtn.isEnabled = false
-                connBadge.text = "● Checking connection to ${settings.serverUrl}..."
+                connBadge.text = "● Checking connection to $lastSavedUrl..."
                 connBadge.foreground = JBColor.GRAY
             }
 
             tokenCache.clear()
             diffCache.clear()
 
-            val result = KoogLlmClient.verifyConnection(settings.serverUrl, settings.modelName)
+            val result = KoogLlmClient.verifyConnection(lastSavedUrl, settings.modelName)
 
             ApplicationManager.getApplication().invokeLater {
                 refreshBtn.isEnabled = true
@@ -321,7 +362,7 @@ class AiControlPanel(
 
                     val displayModel = formatModelName(result.modelId)
                     connBadge.text =
-                        "● Connected: ${settings.serverUrl} ($displayModel) | Ctx: ${result.contextWindow} tok"
+                        "● Connected: $lastSavedUrl ($displayModel) | Ctx: ${result.contextWindow} tok"
                     connBadge.foreground = JBColor(Color(0, 150, 0), Color(80, 200, 80))
 
                     NotificationGroupManager.getInstance()
@@ -335,9 +376,18 @@ class AiControlPanel(
                     updateSelectionState(currentSelectedFiles)
                 } else {
                     isConnected = false
-                    connBadge.text = "● Disconnected: ${result.message}"
+                    connBadge.text = "● Offline (Last URL: $lastSavedUrl)"
                     connBadge.foreground = JBColor.RED
-                    Messages.showErrorDialog(project, result.message, "Connection Check Failed")
+                    urlField.text = lastSavedUrl
+                    connectionStatusLabel.text =
+                        "<html><b>Server offline / unreachable.</b><br>${result.message}<br><span style='color: gray;'>Last used URL: $lastSavedUrl</span></html>"
+                    connectionStatusLabel.foreground = JBColor.RED
+                    cardLayout.show(cardContainer, "SETUP")
+                    Messages.showErrorDialog(
+                        project,
+                        "Could not reach Local LLM at $lastSavedUrl:\n${result.message}",
+                        "Connection Check Failed"
+                    )
                 }
             }
         }

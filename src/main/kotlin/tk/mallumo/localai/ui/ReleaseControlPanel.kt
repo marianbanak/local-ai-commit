@@ -368,17 +368,14 @@ class ReleaseControlPanel(
 
     fun reloadRepositories() {
         val repos = GitRepositoryManager.getInstance(project).repositories
-        repoComboBox.removeAllItems()
-        for (repo in repos) {
-            repoComboBox.addItem(repo)
-        }
-        if (repos.isNotEmpty() && repoComboBox.itemCount > 0) {
+        repoComboBox.model = DefaultComboBoxModel(repos.toTypedArray())
+        if (repos.isNotEmpty()) {
             repoComboBox.selectedIndex = 0
             selectedRepository = repos.first()
             onRepositoryChanged()
         } else {
             selectedRepository = null
-            updateGuideline()
+            onRepositoryChanged()
         }
     }
 
@@ -394,10 +391,12 @@ class ReleaseControlPanel(
     private fun onRepositoryChanged() {
         repoUpdateJob?.cancel()
         val repo = selectedRepository
-        versionFileComboBox.removeAllItems()
-        sourceBranchComboBox.removeAllItems()
         detectedVersionField.text = ""
         if (repo == null) {
+            sourceBranchComboBox.model = DefaultComboBoxModel(emptyArray<String>())
+            versionFileComboBox.model = DefaultComboBoxModel(emptyArray<String>())
+            selectedVersionFile = null
+            updateDefaultReleaseBranch()
             updateGuideline()
             return
         }
@@ -411,23 +410,17 @@ class ReleaseControlPanel(
             ApplicationManager.getApplication().invokeLater {
                 if (selectedRepository != repo) return@invokeLater
 
-                sourceBranchComboBox.removeAllItems()
-                for (b in branches) {
-                    sourceBranchComboBox.addItem(b)
-                }
+                sourceBranchComboBox.model = DefaultComboBoxModel(branches.toTypedArray())
                 if (currentBranch != null && branches.contains(currentBranch)) {
                     sourceBranchComboBox.selectedItem = currentBranch
-                } else if (sourceBranchComboBox.itemCount > 0) {
+                } else if (branches.isNotEmpty()) {
                     sourceBranchComboBox.selectedIndex = 0
                 }
 
-                versionFileComboBox.removeAllItems()
-                for (file in candidates) {
-                    val relPath = VfsUtil.getRelativePath(file, repo.root) ?: file.name
-                    versionFileComboBox.addItem(relPath)
-                }
+                val versionPaths = candidates.map { VfsUtil.getRelativePath(it, repo.root) ?: it.name }
+                versionFileComboBox.model = DefaultComboBoxModel(versionPaths.toTypedArray())
 
-                if (versionFileComboBox.itemCount > 0) {
+                if (candidates.isNotEmpty()) {
                     versionFileComboBox.selectedIndex = 0
                     selectedVersionFile = candidates.firstOrNull()
                     extractVersionFast(selectedVersionFile)
@@ -509,18 +502,13 @@ class ReleaseControlPanel(
 
         FileChooser.chooseFile(descriptor, project, repo.root) { chosen ->
             val relPath = VfsUtil.getRelativePath(chosen, repo.root) ?: chosen.name
-            var exists = false
-            for (i in 0 until versionFileComboBox.itemCount) {
-                if (versionFileComboBox.getItemAt(i) == relPath) {
-                    versionFileComboBox.selectedIndex = i
-                    exists = true
-                    break
-                }
+            val currentItems =
+                (0 until versionFileComboBox.itemCount).map { versionFileComboBox.getItemAt(it) }.toMutableList()
+            if (!currentItems.contains(relPath)) {
+                currentItems.add(relPath)
+                versionFileComboBox.model = DefaultComboBoxModel(currentItems.toTypedArray())
             }
-            if (!exists) {
-                versionFileComboBox.addItem(relPath)
-                versionFileComboBox.selectedItem = relPath
-            }
+            versionFileComboBox.selectedItem = relPath
             selectedVersionFile = chosen
             extractVersionFast(chosen)
             updateGuideline()
@@ -583,7 +571,18 @@ class ReleaseControlPanel(
         }
 
         val version = detectedVersionField.text.trim()
-        val sourceBranch = sourceBranchComboBox.selectedItem as? String ?: repo.currentBranchName ?: "HEAD"
+        val sourceBranch = (sourceBranchComboBox.selectedItem as? String)?.trim()
+            ?: repo.currentBranchName?.trim()
+            ?: ""
+
+        if (sourceBranch.isBlank()) {
+            Messages.showWarningDialog(
+                project,
+                "No source branch selected or available in repository.",
+                "Branch Required"
+            )
+            return
+        }
         val releaseBranch = releaseBranchField.text.trim()
 
         if (releaseBranch.isBlank()) {
@@ -725,11 +724,25 @@ class ReleaseControlPanel(
     }
 
     private fun executeConfirmRelease() {
-        val repo = selectedRepository ?: return
+        val repo = selectedRepository
+        if (repo == null) {
+            Messages.showWarningDialog(project, "Please select a Git repository.", "Repository Required")
+            return
+        }
+        val sourceBranch = (sourceBranchComboBox.selectedItem as? String)?.trim()
+            ?: repo.currentBranchName?.trim()
+            ?: ""
+        if (sourceBranch.isBlank()) {
+            Messages.showWarningDialog(
+                project,
+                "No source branch selected or available in repository.",
+                "Branch Required"
+            )
+            return
+        }
         val versionFile = selectedVersionFile
         val version = detectedVersionField.text.trim()
         val releaseBranch = releaseBranchField.text.trim().ifBlank { "release/$version" }
-        val sourceBranch = sourceBranchComboBox.selectedItem as? String ?: repo.currentBranchName ?: "HEAD"
         val originalBranch = repo.currentBranchName ?: sourceBranch
         val report = previewEditor.text.trim()
 

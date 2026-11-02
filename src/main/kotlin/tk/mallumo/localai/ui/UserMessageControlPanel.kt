@@ -300,17 +300,14 @@ class UserMessageControlPanel(
 
     fun reloadRepositories() {
         val repos = GitRepositoryManager.getInstance(project).repositories
-        repoComboBox.removeAllItems()
-        for (repo in repos) {
-            repoComboBox.addItem(repo)
-        }
-        if (repos.isNotEmpty() && repoComboBox.itemCount > 0) {
+        repoComboBox.model = DefaultComboBoxModel(repos.toTypedArray())
+        if (repos.isNotEmpty()) {
             repoComboBox.selectedIndex = 0
             selectedRepository = repos.first()
             onRepositoryChanged()
         } else {
             selectedRepository = null
-            branchComboBox.removeAllItems()
+            onRepositoryChanged()
         }
     }
 
@@ -325,8 +322,12 @@ class UserMessageControlPanel(
 
     private fun onRepositoryChanged() {
         repoUpdateJob?.cancel()
-        val repo = selectedRepository ?: return
-        branchComboBox.removeAllItems()
+        val repo = selectedRepository
+        if (repo == null) {
+            branchComboBox.model = DefaultComboBoxModel(emptyArray<String>())
+            formStatusLabel.text = "No repository selected"
+            return
+        }
 
         repoUpdateJob = cs.launch(Dispatchers.IO) {
             val branches = gitChangesManager.getLocalBranches(repo)
@@ -336,23 +337,19 @@ class UserMessageControlPanel(
             ApplicationManager.getApplication().invokeLater {
                 if (selectedRepository != repo) return@invokeLater
 
-                branchComboBox.removeAllItems()
-                for (b in branches) {
-                    branchComboBox.addItem(b)
-                }
+                branchComboBox.model = DefaultComboBoxModel(branches.toTypedArray())
 
-                // Default to last release branch, otherwise current branch, otherwise first
                 if (latestRelease != null && branches.contains(latestRelease)) {
                     branchComboBox.selectedItem = latestRelease
                     formStatusLabel.text = "Auto-selected latest release branch: $latestRelease"
                 } else if (currentBranch != null && branches.contains(currentBranch)) {
                     branchComboBox.selectedItem = currentBranch
                     formStatusLabel.text = "Selected current branch: $currentBranch"
-                } else if (branchComboBox.itemCount > 0) {
+                } else if (branches.isNotEmpty()) {
                     branchComboBox.selectedIndex = 0
                     formStatusLabel.text = "Ready"
                 } else {
-                    formStatusLabel.text = "No branches found"
+                    formStatusLabel.text = "No branches found (picker is empty)"
                 }
             }
         }
@@ -365,7 +362,7 @@ class UserMessageControlPanel(
             return
         }
 
-        val branch = branchComboBox.selectedItem as? String
+        val branch = (branchComboBox.selectedItem as? String)?.trim()
         if (branch.isNullOrBlank()) {
             Messages.showWarningDialog(
                 project,

@@ -39,7 +39,7 @@ Rules:
 - Output ONLY the raw commit message. Do NOT wrap it in markdown code blocks."""
 
 class LocalAiCommitState {
-    var serverUrl: String = "http://localhost:11434"
+    var serverUrl: String = LocalAiUrlStorage.loadLastUsedUrl("http://localhost:11434")
     var modelName: String = ""
     var reformatCode: Boolean = true
     var optimizeImports: Boolean = true
@@ -68,6 +68,11 @@ class LocalAiCommitSettingsService : PersistentStateComponent<LocalAiCommitState
 
     override fun loadState(state: LocalAiCommitState) {
         this.state = state
+        if (state.serverUrl.isNotBlank()) {
+            LocalAiUrlStorage.saveLastUsedUrl(state.serverUrl)
+        } else {
+            state.serverUrl = LocalAiUrlStorage.loadLastUsedUrl()
+        }
     }
 
     companion object {
