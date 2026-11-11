@@ -158,6 +158,11 @@ class LocalAiCommitState {
     var reformatCode: Boolean = true
     var optimizeImports: Boolean = true
     var rearrangeCode: Boolean = false
+    var reformatXml: Boolean = LocalAiUrlStorage.loadReformatXml(false)
+        set(value) {
+            field = value
+            LocalAiUrlStorage.saveReformatXml(value)
+        }
     var commitMessageSize: String = LocalAiUrlStorage.loadCommitSize(CommitMessageSize.MEDIUM.name)
     var systemPrompt: String = DEFAULT_SYSTEM_PROMPT
     var chunkSystemPrompt: String = DEFAULT_CHUNK_SYSTEM_PROMPT
@@ -204,6 +209,7 @@ class LocalAiCommitSettingsService : PersistentStateComponent<LocalAiCommitState
         } else {
             state.commitMessageSize = LocalAiUrlStorage.loadCommitSize()
         }
+        LocalAiUrlStorage.saveReformatXml(state.reformatXml)
     }
 
     companion object {

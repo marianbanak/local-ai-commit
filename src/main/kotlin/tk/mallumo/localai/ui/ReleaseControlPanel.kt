@@ -6,29 +6,26 @@ import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
-import com.intellij.openapi.fileChooser.FileChooser
-import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.ui.Messages
-import com.intellij.openapi.vcs.changes.VcsDirtyScopeManager
-import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.*
 import com.intellij.util.ui.JBUI
-import git4idea.commands.Git
-import git4idea.commands.GitCommand
-import git4idea.commands.GitLineHandler
 import git4idea.repo.GitRepository
 import git4idea.repo.GitRepositoryManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import tk.mallumo.localai.buildsystem.BuildSystemDetector
+import tk.mallumo.localai.buildsystem.BuildSystemType
+import tk.mallumo.localai.buildsystem.DetectedModule
+import tk.mallumo.localai.buildsystem.ProjectBuildStructure
 import tk.mallumo.localai.git.GitChangesManager
+import tk.mallumo.localai.llm.MultiModuleVersionAnalyzer
 import tk.mallumo.localai.llm.ReleaseReportStrategy
-import tk.mallumo.localai.llm.VersionExtractor
 import tk.mallumo.localai.settings.LocalAiCommitSettingsService
 import java.awt.*
 import java.awt.datatransfer.StringSelection
@@ -52,6 +49,14 @@ class ReleaseControlPanel(
     private var generationJob: Job? = null
     private var repoUpdateJob: Job? = null
     private var currentGeneratedReport: String = ""
+
+    // Repository memory for branches
+    private val repoSourceBranches = mutableMapOf<String, String>()
+    private val repoReleaseBranches = mutableMapOf<String, String>()
+
+    // Build system & modules state
+    private var currentBuildStructure: ProjectBuildStructure? = null
+    private var currentDetectedModules = listOf<DetectedModule>()
 
     // Card Layout container
     private val cardLayout = CardLayout()
@@ -85,10 +90,26 @@ class ReleaseControlPanel(
     private val browseVersionFileBtn = JButton(AllIcons.General.OpenDisk)
     private val detectedVersionField = JBTextField(10)
     private val detectVersionAiBtn = JButton("AI Extract", AllIcons.Actions.RefactoringBulb)
+    private val scanModulesBtn = JButton("AI Scan Modules", AllIcons.Actions.RefactoringBulb)
 
     // Branch controls
     private val sourceBranchComboBox = ComboBox<String>()
-    private val releaseBranchField = JBTextField(16)
+    private val releaseBranchField = JBTextField("release", 14)
+    private val branchStatusLabel = JBLabel("Ready").apply {
+        font = font.deriveFont(Font.ITALIC, 11f)
+        foreground = JBColor.GRAY
+    }
+    private val pushToRemoteBox = JBCheckBox("Push release branch to origin", true)
+
+    // Modules display
+    private val modulesSummaryLabel = JBLabel("Scanning build system...").apply {
+        font = font.deriveFont(Font.BOLD, 11f)
+        foreground = JBColor.GRAY
+    }
+    private val modulesPanel = JPanel().apply {
+        layout = BoxLayout(this, BoxLayout.Y_AXIS)
+        isOpaque = false
+    }
 
     // Range controls
     private val autoCompareBranchesCheckbox = JBCheckBox("Auto-detect branch diff split (merge-base)", true)
@@ -207,59 +228,76 @@ class ReleaseControlPanel(
         configPanel.add(repoComboBox, gbc)
         gbc.gridwidth = 1
 
-        // Row 1: Version File & Version
-        row++
-        gbc.gridx = 0; gbc.gridy = row; gbc.weightx = 0.0
-        configPanel.add(JBLabel("Version File:"), gbc)
-
-        val fileSelectPanel = JPanel(BorderLayout(4, 0))
-        fileSelectPanel.add(versionFileComboBox, BorderLayout.CENTER)
-        browseVersionFileBtn.toolTipText = "Browse custom version file..."
-        browseVersionFileBtn.addActionListener { browseCustomVersionFile() }
-        fileSelectPanel.add(browseVersionFileBtn, BorderLayout.EAST)
-        versionFileComboBox.addActionListener { onVersionFileSelectionChanged() }
-
-        gbc.gridx = 1; gbc.weightx = 0.6
-        configPanel.add(fileSelectPanel, gbc)
-
-        val versionDisplayPanel = JPanel(FlowLayout(FlowLayout.LEFT, 4, 0))
-        versionDisplayPanel.add(JBLabel("Version:"))
-        detectedVersionField.document.addDocumentListener(object : javax.swing.event.DocumentListener {
-            override fun insertUpdate(e: javax.swing.event.DocumentEvent?) {
-                updateDefaultReleaseBranch()
-            }
-
-            override fun removeUpdate(e: javax.swing.event.DocumentEvent?) {
-                updateDefaultReleaseBranch()
-            }
-
-            override fun changedUpdate(e: javax.swing.event.DocumentEvent?) {
-                updateDefaultReleaseBranch()
-            }
-        })
-        versionDisplayPanel.add(detectedVersionField)
-        detectVersionAiBtn.toolTipText = "Extract version string using local AI"
-        detectVersionAiBtn.addActionListener { extractVersionViaAi() }
-        versionDisplayPanel.add(detectVersionAiBtn)
-
-        gbc.gridx = 2; gbc.weightx = 0.4
-        configPanel.add(versionDisplayPanel, gbc)
-
-        // Row 2: Source Branch & Release Branch
+        // Row 1: Source Branch & Release Branch
         row++
         gbc.gridx = 0; gbc.gridy = row; gbc.weightx = 0.0
         configPanel.add(JBLabel("Source Branch:"), gbc)
 
+        sourceBranchComboBox.addActionListener {
+            updateBranchStatus()
+        }
         gbc.gridx = 1; gbc.weightx = 0.5
         configPanel.add(sourceBranchComboBox, gbc)
 
         val releaseBranchPanel = JPanel(BorderLayout(6, 0))
         releaseBranchPanel.add(JBLabel("Release Branch:"), BorderLayout.WEST)
+        releaseBranchField.document.addDocumentListener(object : javax.swing.event.DocumentListener {
+            override fun insertUpdate(e: javax.swing.event.DocumentEvent?) {
+                updateBranchStatus()
+            }
+
+            override fun removeUpdate(e: javax.swing.event.DocumentEvent?) {
+                updateBranchStatus()
+            }
+
+            override fun changedUpdate(e: javax.swing.event.DocumentEvent?) {
+                updateBranchStatus()
+            }
+        })
         releaseBranchPanel.add(releaseBranchField, BorderLayout.CENTER)
         gbc.gridx = 2; gbc.weightx = 0.5
         configPanel.add(releaseBranchPanel, gbc)
 
-        // Row 3: Commit Diff Mode
+        // Row 2: Branch shipping mode status & Push checkbox
+        row++
+        gbc.gridx = 1; gbc.gridy = row; gbc.gridwidth = 2; gbc.weightx = 1.0
+        val branchMetaPanel = JPanel(BorderLayout(8, 0)).apply { isOpaque = false }
+        branchMetaPanel.add(branchStatusLabel, BorderLayout.CENTER)
+        branchMetaPanel.add(pushToRemoteBox, BorderLayout.EAST)
+        configPanel.add(branchMetaPanel, gbc)
+        gbc.gridwidth = 1
+
+        // Row 3: Release Version & Multi-Module Detection
+        row++
+        gbc.gridx = 0; gbc.gridy = row; gbc.weightx = 0.0
+        configPanel.add(JBLabel("Release Version:"), gbc)
+
+        val versionRow = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply { isOpaque = false }
+        versionRow.add(detectedVersionField)
+        scanModulesBtn.toolTipText = "Scan build tree, catalogs (libs.versions.toml), and Amper templates using AI"
+        scanModulesBtn.addActionListener { scanModulesViaAi() }
+        versionRow.add(scanModulesBtn)
+        gbc.gridx = 1; gbc.weightx = 0.6
+        configPanel.add(versionRow, gbc)
+
+        gbc.gridx = 2; gbc.weightx = 0.4
+        configPanel.add(modulesSummaryLabel, gbc)
+
+        // Row 4: Modules Details Table Panel
+        row++
+        gbc.gridx = 1; gbc.gridy = row; gbc.gridwidth = 2; gbc.weightx = 1.0
+        val modulesContainer = JPanel(BorderLayout()).apply {
+            border = JBUI.Borders.compound(
+                JBUI.Borders.customLine(JBColor.border(), 1),
+                JBUI.Borders.empty(4, 8)
+            )
+            background = JBColor.namedColor("Panel.background", JBColor.PanelBackground)
+            add(modulesPanel, BorderLayout.CENTER)
+        }
+        configPanel.add(modulesContainer, gbc)
+        gbc.gridwidth = 1
+
+        // Row 5: Commit Diff Range
         row++
         gbc.gridx = 0; gbc.gridy = row; gbc.weightx = 0.0
         configPanel.add(JBLabel("Commit Range:"), gbc)
@@ -392,126 +430,126 @@ class ReleaseControlPanel(
         repoUpdateJob?.cancel()
         val repo = selectedRepository
         detectedVersionField.text = ""
+        modulesPanel.removeAll()
+        modulesSummaryLabel.text = "Scanning build system..."
         if (repo == null) {
             sourceBranchComboBox.model = DefaultComboBoxModel(emptyArray<String>())
-            versionFileComboBox.model = DefaultComboBoxModel(emptyArray<String>())
-            selectedVersionFile = null
-            updateDefaultReleaseBranch()
             updateGuideline()
             return
         }
+
+        val rememberedSource = repoSourceBranches[repo.root.path]
+        val rememberedRelease = repoReleaseBranches[repo.root.path] ?: "release"
+        releaseBranchField.text = rememberedRelease
 
         // Populate Branches & Candidates asynchronously on Dispatchers.IO to avoid blocking EDT
         repoUpdateJob = cs.launch(Dispatchers.IO) {
             val branches = gitChangesManager.getLocalBranches(repo)
             val currentBranch = repo.currentBranchName
-            val candidates = gitChangesManager.detectCandidateVersionFiles(repo)
+            val buildStructure = BuildSystemDetector.detect(repo, gitChangesManager)
+            currentBuildStructure = buildStructure
+            currentDetectedModules = buildStructure.modules
 
             ApplicationManager.getApplication().invokeLater {
                 if (selectedRepository != repo) return@invokeLater
 
                 sourceBranchComboBox.model = DefaultComboBoxModel(branches.toTypedArray())
-                if (currentBranch != null && branches.contains(currentBranch)) {
+                if (rememberedSource != null && branches.contains(rememberedSource)) {
+                    sourceBranchComboBox.selectedItem = rememberedSource
+                } else if (currentBranch != null && branches.contains(currentBranch)) {
                     sourceBranchComboBox.selectedItem = currentBranch
                 } else if (branches.isNotEmpty()) {
                     sourceBranchComboBox.selectedIndex = 0
                 }
 
-                val versionPaths = candidates.map { VfsUtil.getRelativePath(it, repo.root) ?: it.name }
-                versionFileComboBox.model = DefaultComboBoxModel(versionPaths.toTypedArray())
+                val primaryVer = buildStructure.modules.firstOrNull { !it.version.isNullOrBlank() }?.version ?: ""
+                detectedVersionField.text = primaryVer
 
-                if (candidates.isNotEmpty()) {
-                    versionFileComboBox.selectedIndex = 0
-                    selectedVersionFile = candidates.firstOrNull()
-                    extractVersionFast(selectedVersionFile)
-                } else {
-                    selectedVersionFile = null
-                    updateDefaultReleaseBranch()
-                }
-
+                renderModulesPanel(buildStructure.modules, buildStructure.primaryBuildSystem)
+                updateBranchStatus()
                 updateGuideline()
             }
         }
     }
 
-    private fun updateDefaultReleaseBranch() {
-        val ver = detectedVersionField.text.trim()
-        releaseBranchField.text = if (ver.isNotBlank()) "release/$ver" else "release"
-    }
-
-    private fun onVersionFileSelectionChanged() {
+    private fun updateBranchStatus() {
         val repo = selectedRepository ?: return
-        val relPath = versionFileComboBox.selectedItem as? String ?: return
-        val file = repo.root.findFileByRelativePath(relPath)
-        selectedVersionFile = file
-        if (file != null) {
-            extractVersionFast(file)
-        }
-        updateGuideline()
-    }
+        val source = (sourceBranchComboBox.selectedItem as? String)?.trim() ?: repo.currentBranchName ?: "main"
+        val target = releaseBranchField.text.trim().ifBlank { "release" }
 
-    private fun extractVersionFast(file: VirtualFile?) {
-        if (file == null) return
-        val v = VersionExtractor.extractVersionFast(file)
-        if (!v.isNullOrBlank()) {
-            detectedVersionField.text = v
-            formStatusLabel.text = "Detected version $v from ${file.name}"
-            formStatusLabel.foreground = JBColor(0x388E3C, 0x81C784)
+        repoSourceBranches[repo.root.path] = source
+        repoReleaseBranches[repo.root.path] = target
+
+        val exists = gitChangesManager.branchOrTagExists(repo, target)
+        if (exists) {
+            branchStatusLabel.text = "Existing '$target' branch will be updated from '$source' (merge commit topology)"
+            branchStatusLabel.foreground = JBColor(0x2E7D32, 0x81C784)
         } else {
-            formStatusLabel.text = "Could not parse version from ${file.name}. Enter manually or use AI Extract."
-            formStatusLabel.foreground = JBColor.GRAY
+            branchStatusLabel.text = "Initial '$target' branch will be created from '$source'"
+            branchStatusLabel.foreground = JBColor(0x1976D2, 0x64B5F6)
         }
-        updateDefaultReleaseBranch()
     }
 
-    private fun extractVersionViaAi() {
-        val file = selectedVersionFile
-        if (file == null) {
-            Messages.showWarningDialog(project, "Please select a version file first.", "No Version File Selected")
-            return
-        }
+    private fun renderModulesPanel(modules: List<DetectedModule>, system: BuildSystemType) {
+        modulesPanel.removeAll()
+        if (modules.isEmpty()) {
+            modulesSummaryLabel.text = "Build System: ${system.displayName} (Single project / no submodules)"
+        } else {
+            val changedCount = modules.count { it.isChangedInReleaseRange }
+            val modifiedText = if (changedCount > 0) " ($changedCount modified in this release)" else ""
+            modulesSummaryLabel.text = "Build System: ${system.displayName} | ${modules.size} module(s)$modifiedText"
 
-        formStatusLabel.text = "Querying AI for version string..."
-        formStatusLabel.foreground = JBColor.BLUE
-        detectVersionAiBtn.isEnabled = false
-
-        cs.launch {
-            val version = VersionExtractor.extractVersionWithAi(file, settingsService)
-            ApplicationManager.getApplication().invokeLater {
-                detectVersionAiBtn.isEnabled = true
-                if (!version.isNullOrBlank()) {
-                    detectedVersionField.text = version
-                    formStatusLabel.text = "AI extracted version $version"
-                    formStatusLabel.foreground = JBColor(0x388E3C, 0x81C784)
-                    updateDefaultReleaseBranch()
-                } else {
-                    formStatusLabel.text = "AI could not detect version in ${file.name}."
-                    formStatusLabel.foreground = JBColor.RED
+            for (mod in modules) {
+                val row = JPanel(FlowLayout(FlowLayout.LEFT, 6, 2)).apply { isOpaque = false }
+                val nameLabel = JBLabel("${mod.name}:").apply { font = font.deriveFont(Font.BOLD, 11f) }
+                val verLabel = JBLabel(mod.version ?: "unspecified").apply { font = font.deriveFont(Font.PLAIN, 11f) }
+                row.add(nameLabel)
+                row.add(verLabel)
+                if (mod.versionReference != null) {
+                    val refLabel = JBLabel("(${mod.versionReference})").apply {
+                        font = font.deriveFont(Font.ITALIC, 10f)
+                        foreground = JBColor.GRAY
+                    }
+                    row.add(refLabel)
                 }
+                if (mod.isChangedInReleaseRange) {
+                    val badge = JBLabel("MODIFIED").apply {
+                        font = font.deriveFont(Font.BOLD, 9f)
+                        foreground = JBColor(0x2E7D32, 0x81C784)
+                    }
+                    row.add(badge)
+                }
+                modulesPanel.add(row)
             }
         }
+        modulesPanel.revalidate()
+        modulesPanel.repaint()
     }
 
-    private fun browseCustomVersionFile() {
+    private fun scanModulesViaAi() {
         val repo = selectedRepository ?: return
-        val descriptor = FileChooserDescriptorFactory.createSingleFileDescriptor()
-        descriptor.title = "Select Version File"
-        descriptor.description =
-            "Select the file containing the project or app version number (e.g., .toml, .gradle, .properties)"
-        descriptor.setRoots(repo.root)
+        val build = currentBuildStructure ?: return
+        scanModulesBtn.isEnabled = false
+        formStatusLabel.text = "AI scanning project tree, version catalogs, and templates..."
+        formStatusLabel.foreground = JBColor.BLUE
 
-        FileChooser.chooseFile(descriptor, project, repo.root) { chosen ->
-            val relPath = VfsUtil.getRelativePath(chosen, repo.root) ?: chosen.name
-            val currentItems =
-                (0 until versionFileComboBox.itemCount).map { versionFileComboBox.getItemAt(it) }.toMutableList()
-            if (!currentItems.contains(relPath)) {
-                currentItems.add(relPath)
-                versionFileComboBox.model = DefaultComboBoxModel(currentItems.toTypedArray())
+        cs.launch(Dispatchers.IO) {
+            val result = MultiModuleVersionAnalyzer.analyzeVersions(
+                repository = repo,
+                buildStructure = build,
+                settingsService = settingsService
+            )
+
+            ApplicationManager.getApplication().invokeLater {
+                scanModulesBtn.isEnabled = true
+                if (!result.primaryVersion.isNullOrBlank()) {
+                    detectedVersionField.text = result.primaryVersion
+                }
+                currentDetectedModules = result.modules
+                renderModulesPanel(result.modules, build.primaryBuildSystem)
+                formStatusLabel.text = "AI module scan completed."
+                formStatusLabel.foreground = JBColor(0x2E7D32, 0x81C784)
             }
-            versionFileComboBox.selectedItem = relPath
-            selectedVersionFile = chosen
-            extractVersionFast(chosen)
-            updateGuideline()
         }
     }
 
@@ -538,17 +576,9 @@ class ReleaseControlPanel(
         }
 
         resolveChangesBtn.isVisible = false
-        val file = selectedVersionFile
-        if (file == null) {
-            guidelineLabel.text =
-                "<html><b>Guideline:</b> Selected repository: <code>${repo.root.name}</code> (Clean). Please select or browse the <b>version file</b>.</html>"
-            guidelineLabel.foreground = JBColor(0xE65100, 0xFFB74D) // Amber warning
-            generateBtn.isEnabled = true
-            return
-        }
-
+        val target = releaseBranchField.text.trim().ifBlank { "release" }
         guidelineLabel.text =
-            "<html><b>Ready:</b> Working tree is clean. Ready to generate release report for <code>${repo.root.name}</code>.</html>"
+            "<html><b>Ready:</b> Working tree is clean. Ready to generate release report for <code>${repo.root.name}</code> to branch <code>$target</code>.</html>"
         guidelineLabel.foreground = JBColor(0x2E7D32, 0x81C784) // Green
         generateBtn.isEnabled = true
     }
@@ -583,12 +613,7 @@ class ReleaseControlPanel(
             )
             return
         }
-        val releaseBranch = releaseBranchField.text.trim()
-
-        if (releaseBranch.isBlank()) {
-            Messages.showWarningDialog(project, "Please specify a release branch name.", "Release Branch Missing")
-            return
-        }
+        val releaseBranch = releaseBranchField.text.trim().ifBlank { "release" }
 
         // Switch to STREAM card immediately
         val consoleStreamer = ThinkingConsoleStreamer(streamConsole)
@@ -598,19 +623,26 @@ class ReleaseControlPanel(
 
         generationJob = cs.launch(Dispatchers.IO) {
             try {
-                // Check if release branch already exists before generating report (on IO thread to prevent EDT assertions)
-                if (gitChangesManager.branchOrTagExists(repo, releaseBranch)) {
-                    ApplicationManager.getApplication().invokeLater {
-                        cardLayout.show(cardContainer, "FORM")
-                        Messages.showWarningDialog(
-                            project,
-                            "The release branch '$releaseBranch' already exists in '${repo.root.name}'.\n\n" +
-                                    "Please update the version number in your version file (e.g. bump patch or minor version) " +
-                                    "or specify a unique release branch name before proceeding.",
-                            "Release Branch Already Exists"
-                        )
+                // Detect changed files between target and source to identify which modules are modified
+                val changedFiles = if (gitChangesManager.branchOrTagExists(repo, releaseBranch)) {
+                    val baseCommit = gitChangesManager.getMergeBase(repo, releaseBranch, sourceBranch)
+                    if (!baseCommit.isNullOrBlank()) {
+                        gitChangesManager.getChangedFilesBetween(repo, baseCommit, sourceBranch).toSet()
+                    } else {
+                        emptySet()
                     }
-                    return@launch
+                } else {
+                    emptySet()
+                }
+
+                // Update modules with changedFilesInRange if available
+                if (changedFiles.isNotEmpty() && currentBuildStructure != null) {
+                    val updatedBuild = BuildSystemDetector.detect(repo, gitChangesManager, changedFiles)
+                    currentBuildStructure = updatedBuild
+                    currentDetectedModules = updatedBuild.modules
+                    ApplicationManager.getApplication().invokeLater {
+                        renderModulesPanel(updatedBuild.modules, updatedBuild.primaryBuildSystem)
+                    }
                 }
 
                 val isAuto = autoCompareBranchesCheckbox.isSelected
@@ -643,6 +675,16 @@ class ReleaseControlPanel(
                     return@launch
                 }
 
+                val moduleInfo = if (currentDetectedModules.isNotEmpty()) {
+                    buildString {
+                        appendLine("Detected Modules & Versions:")
+                        for (mod in currentDetectedModules) {
+                            val modStatus = if (mod.isChangedInReleaseRange) " (MODIFIED in this release)" else ""
+                            appendLine("- Module: ${mod.name}, Version: ${mod.version ?: "unknown"}, Build: ${mod.buildSystem.displayName}$modStatus")
+                        }
+                    }
+                } else ""
+
                 ApplicationManager.getApplication().invokeLater {
                     streamProgressLabel.text = "Streaming release report from AI..."
                 }
@@ -651,6 +693,7 @@ class ReleaseControlPanel(
                     settingsService = settingsService,
                     version = version,
                     commitLogs = commitLogs,
+                    moduleInfo = moduleInfo,
                     onToken = { token ->
                         ApplicationManager.getApplication().invokeLater {
                             consoleStreamer.appendToken(token)
@@ -740,18 +783,22 @@ class ReleaseControlPanel(
             )
             return
         }
-        val versionFile = selectedVersionFile
         val version = detectedVersionField.text.trim()
-        val releaseBranch = releaseBranchField.text.trim().ifBlank { "release/$version" }
-        val originalBranch = repo.currentBranchName ?: sourceBranch
+        val releaseBranch = releaseBranchField.text.trim().ifBlank { "release" }
         val report = previewEditor.text.trim()
+        val pushToRemote = pushToRemoteBox.isSelected
 
         val commitTitle =
             if (version.isNotBlank()) "chore(release): prepare release v$version" else "chore(release): release report"
         val fullCommitMessage = "$commitTitle\n\n$report"
 
+        val targetExists = gitChangesManager.branchOrTagExists(repo, releaseBranch)
+        val actionDesc =
+            if (targetExists) "update branch '$releaseBranch' (merge commit topology)" else "create branch '$releaseBranch'"
+        val pushDesc = if (pushToRemote) " and push to origin" else ""
+
         val confirmMsg =
-            "Create release branch '$releaseBranch' from '$sourceBranch', commit release report, and return to '$originalBranch'?\n\nTarget File: ${versionFile?.name ?: "Release Report"}"
+            "Ready to $actionDesc from '$sourceBranch'$pushDesc for repository '${repo.root.name}'?\n\nWorking tree will remain intact on current branch."
         val proceed = Messages.showYesNoDialog(
             project,
             confirmMsg,
@@ -764,68 +811,32 @@ class ReleaseControlPanel(
 
         cs.launch(Dispatchers.IO) {
             try {
-                if (gitChangesManager.branchOrTagExists(repo, releaseBranch)) {
-                    ApplicationManager.getApplication().invokeLater {
-                        Messages.showWarningDialog(
-                            project,
-                            "The release branch '$releaseBranch' already exists in '${repo.root.name}'.\n\n" +
-                                    "Please update the version number or specify a different branch name before proceeding.",
-                            "Release Branch Already Exists"
-                        )
-                    }
-                    return@launch
-                }
+                val (success, message) = gitChangesManager.shipRelease(
+                    repository = repo,
+                    sourceBranch = sourceBranch,
+                    targetBranch = releaseBranch,
+                    message = fullCommitMessage,
+                    pushToRemote = pushToRemote
+                )
 
-                // 1. Create and checkout the release branch from source branch
-                val branchCreated = gitChangesManager.createAndCheckoutBranch(repo, releaseBranch, sourceBranch)
-                if (!branchCreated) {
-                    throw RuntimeException("Failed to create or checkout branch '$releaseBranch'")
+                if (!success) {
+                    throw RuntimeException(message)
                 }
-
-                // 2. Stage version file if present
-                if (versionFile != null) {
-                    val relPath = VfsUtil.getRelativePath(versionFile, repo.root) ?: versionFile.name
-                    val addHandler = GitLineHandler(project, repo.root, GitCommand.ADD).apply {
-                        addParameters("--", relPath)
-                    }
-                    Git.getInstance().runCommand(addHandler)
-                }
-
-                // 3. Commit release message
-                val commitHandler = GitLineHandler(project, repo.root, GitCommand.COMMIT).apply {
-                    addParameters("-m", fullCommitMessage, "--allow-empty")
-                }
-                val commitRes = Git.getInstance().runCommand(commitHandler)
-                if (!commitRes.success()) {
-                    throw RuntimeException("Commit failed: ${commitRes.errorOutputAsJoinedString}")
-                }
-
-                // 4. Return back to the original branch
-                val switchedBack = gitChangesManager.checkoutBranch(repo, originalBranch)
-                if (!switchedBack) {
-                    LOG.warn("Could not switch back to original branch '$originalBranch'")
-                }
-
-                repo.update()
-                if (versionFile != null) {
-                    VfsUtil.markDirtyAndRefresh(true, true, true, versionFile, repo.root)
-                }
-                VcsDirtyScopeManager.getInstance(project).markEverythingDirty()
 
                 ApplicationManager.getApplication().invokeLater {
                     NotificationGroupManager.getInstance()
                         .getNotificationGroup("Local AI Commit")
                         .createNotification(
-                            "Release Committed",
-                            "Release branch '$releaseBranch' created and committed. Returned to '$originalBranch'.",
+                            "Release Shipped",
+                            message,
                             NotificationType.INFORMATION
                         )
                         .notify(project)
 
                     cardLayout.show(cardContainer, "FORM")
-                    formStatusLabel.text = "Release '$releaseBranch' committed. Returned to '$originalBranch'."
+                    formStatusLabel.text = message
                     formStatusLabel.foreground = JBColor(0x2E7D32, 0x81C784)
-                    onRepositoryChanged()
+                    updateBranchStatus()
                     onReleaseCommitted()
                 }
             } catch (e: Exception) {

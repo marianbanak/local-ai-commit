@@ -6,6 +6,7 @@ object LocalAiUrlStorage {
     private val configDir = File(System.getProperty("user.home"), ".config/local-ai-commit")
     private val configFile = File(configDir, "last_url.txt")
     private val sizeFile = File(configDir, "commit_size.txt")
+    private val reformatXmlFile = File(configDir, "reformat_xml.txt")
 
     fun loadLastUsedUrl(fallback: String = "http://localhost:11434"): String {
         return try {
@@ -55,6 +56,28 @@ object LocalAiUrlStorage {
                 }
                 sizeFile.writeText(clean)
             }
+        } catch (_: Exception) {
+        }
+    }
+
+    fun loadReformatXml(fallback: Boolean = false): Boolean {
+        return try {
+            if (reformatXmlFile.exists() && reformatXmlFile.isFile) {
+                reformatXmlFile.readText().trim().toBooleanStrictOrNull() ?: fallback
+            } else {
+                fallback
+            }
+        } catch (_: Exception) {
+            fallback
+        }
+    }
+
+    fun saveReformatXml(enabled: Boolean) {
+        try {
+            if (!configDir.exists()) {
+                configDir.mkdirs()
+            }
+            reformatXmlFile.writeText(enabled.toString())
         } catch (_: Exception) {
         }
     }

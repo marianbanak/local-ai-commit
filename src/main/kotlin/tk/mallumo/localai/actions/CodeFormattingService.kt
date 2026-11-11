@@ -11,22 +11,48 @@ import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiManager
 
 object CodeFormattingService {
+
+    fun isXmlFile(fileName: String): Boolean {
+        return fileName.endsWith(".xml", ignoreCase = true)
+    }
+
+    fun isXmlFile(file: VirtualFile): Boolean {
+        return (file.extension?.equals("xml", ignoreCase = true) == true) || isXmlFile(file.name)
+    }
+
     fun formatFiles(
         project: Project,
         files: List<VirtualFile>,
         reformat: Boolean,
         optimizeImports: Boolean,
-        rearrange: Boolean
+        rearrange: Boolean,
+        reformatXml: Boolean = false
     ) {
-        if (files.isEmpty() || (!reformat && !optimizeImports && !rearrange)) return
+        val targetFiles = if (!reformatXml) {
+            files.filterNot { isXmlFile(it) }
+        } else {
+            files
+        }
+        if (targetFiles.isEmpty() || (!reformat && !optimizeImports && !rearrange)) return
 
         ApplicationManager.getApplication().invokeAndWait {
             FileDocumentManager.getInstance().saveAllDocuments()
 
             val psiManager = PsiManager.getInstance(project)
-            val psiFiles = files.mapNotNull { vf ->
+            val psiFiles = targetFiles.mapNotNull { vf ->
                 if (vf.isValid && !vf.isDirectory) {
-                    psiManager.findFile(vf)
+                    val psi = psiManager.findFile(vf)
+                    if (psi != null) {
+                        if (!reformatXml && (psi.fileType.name.equals(
+                                "XML",
+                                ignoreCase = true
+                            ) || isXmlFile(psi.name))
+                        ) {
+                            null
+                        } else {
+                            psi
+                        }
+                    } else null
                 } else null
             }
             if (psiFiles.isEmpty()) return@invokeAndWait

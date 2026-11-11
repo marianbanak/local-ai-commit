@@ -65,6 +65,7 @@ class AiControlPanel(
     private val reformatBox = JBCheckBox("Reformat Code", settings.reformatCode)
     private val optimizeBox = JBCheckBox("Optimize Imports", settings.optimizeImports)
     private val rearrangeBox = JBCheckBox("Rearrange Code", settings.rearrangeCode)
+    private val reformatXmlBox = JBCheckBox("Reformat XML files", settings.reformatXml)
     private val selectionInfoLabel = JBLabel("No files selected", SwingConstants.CENTER)
     private val generateBtn = JButton("Generate Commit Message")
     private val commitSizeComboBox = ComboBox(DefaultComboBoxModel(CommitMessageSize.values())).apply {
@@ -191,10 +192,12 @@ class AiControlPanel(
         reformatBox.addActionListener { settings.reformatCode = reformatBox.isSelected }
         optimizeBox.addActionListener { settings.optimizeImports = optimizeBox.isSelected }
         rearrangeBox.addActionListener { settings.rearrangeCode = rearrangeBox.isSelected }
+        reformatXmlBox.addActionListener { settings.reformatXml = reformatXmlBox.isSelected }
 
         togglesPanel.add(reformatBox)
         togglesPanel.add(optimizeBox)
         togglesPanel.add(rearrangeBox)
+        togglesPanel.add(reformatXmlBox)
 
         val topHeader = JPanel(BorderLayout()).apply {
             add(topBar, BorderLayout.NORTH)
@@ -533,7 +536,8 @@ class AiControlPanel(
                         files = vfs,
                         reformat = settings.reformatCode,
                         optimizeImports = settings.optimizeImports,
-                        rearrange = settings.rearrangeCode
+                        rearrange = settings.rearrangeCode,
+                        reformatXml = settings.reformatXml
                     )
                 }
 

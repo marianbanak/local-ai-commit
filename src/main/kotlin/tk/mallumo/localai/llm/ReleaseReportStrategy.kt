@@ -18,6 +18,7 @@ Use clean Markdown formatting. Do not wrap the output in markdown code blocks. D
         settingsService: LocalAiCommitSettingsService,
         version: String,
         commitLogs: String,
+        moduleInfo: String = "",
         onToken: suspend (String) -> Unit
     ): Pair<String, Boolean> {
         val titleHeader = if (version.isNotBlank()) "# RELEASE v$version\n\n\n" else "# RELEASE\n\n\n"
@@ -34,7 +35,8 @@ Use clean Markdown formatting. Do not wrap the output in markdown code blocks. D
             commitLogs
         }
 
-        val userPrompt = "Here are the git commit logs:\n\n$safeLogs"
+        val userPrompt =
+            (if (moduleInfo.isNotBlank()) "$moduleInfo\n\n" else "") + "Here are the git commit logs:\n\n$safeLogs"
 
         val (rawResult, loopDetected) = KoogLlmClient.generateStreaming(
             baseUrlInput = serverUrl,

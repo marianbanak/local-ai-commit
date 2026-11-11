@@ -1,5 +1,8 @@
 package tk.mallumo.localai.git
 
+import com.intellij.execution.configurations.GeneralCommandLine
+import com.intellij.execution.util.ExecUtil
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.guessProjectDir
@@ -14,11 +17,13 @@ import com.intellij.openapi.vfs.VirtualFile
 import git4idea.commands.Git
 import git4idea.commands.GitCommand
 import git4idea.commands.GitLineHandler
+import git4idea.config.GitExecutableManager
 import git4idea.repo.GitRepository
 import git4idea.repo.GitRepositoryChangeListener
 import git4idea.repo.GitRepositoryManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 
 enum class FileItemStatus {
     MODIFIED, ADDED, DELETED, UNVERSIONED
@@ -440,29 +445,76 @@ class GitChangesManager(private val project: Project) {
     fun branchOrTagExists(repository: GitRepository, refName: String): Boolean {
         val clean = refName.trim()
         if (clean.isBlank()) return false
-        val localBranches = getLocalBranches(repository)
-        if (localBranches.any { it.equals(clean, ignoreCase = true) }) return true
 
-        // Check remote branches or tags via rev-parse
-        val handler = GitLineHandler(project, repository.root, GitCommand.REV_PARSE).apply {
-            addParameters("--verify", "refs/heads/$clean")
-        }
-        if (Git.getInstance().runCommand(handler).success()) return true
+        // 1. Fast in-memory check using IntelliJ's GitRepository model
+        if (repository.branches.findLocalBranch(clean) != null) return true
+        if (repository.branches.findRemoteBranch(clean) != null) return true
+        if (repository.branches.findBranchByName(clean) != null) return true
+        if (repository.branches.localBranches.any { it.name.equals(clean, ignoreCase = true) }) return true
+        if (repository.branches.remoteBranches.any {
+                it.nameForRemoteOperations.equals(clean, ignoreCase = true) || it.name.equals(clean, ignoreCase = true)
+            }) return true
 
-        val tagHandler = GitLineHandler(project, repository.root, GitCommand.REV_PARSE).apply {
-            addParameters("--verify", "refs/tags/$clean")
+        // 2. Fast in-memory tag check
+        try {
+            if (repository.tagHolder.getTag(clean) != null || repository.tagHolder.getTag("v$clean") != null) {
+                return true
+            }
+        } catch (_: Throwable) {
         }
-        if (Git.getInstance().runCommand(tagHandler).success()) return true
 
-        val tagVHandler = GitLineHandler(project, repository.root, GitCommand.REV_PARSE).apply {
-            addParameters("--verify", "refs/tags/v$clean")
+        // 3. Fast direct filesystem check (.git refs)
+        try {
+            val gitDir = File(repository.root.path, ".git")
+            if (File(gitDir, "refs/heads/$clean").exists()) return true
+            if (File(gitDir, "refs/remotes/origin/$clean").exists()) return true
+            if (File(gitDir, "refs/tags/$clean").exists()) return true
+            if (File(gitDir, "refs/tags/v$clean").exists()) return true
+
+            val packedRefs = File(gitDir, "packed-refs")
+            if (packedRefs.exists()) {
+                val lines = packedRefs.readLines()
+                if (lines.any {
+                        it.endsWith("refs/heads/$clean") ||
+                                it.endsWith("refs/remotes/origin/$clean") ||
+                                it.endsWith("refs/tags/$clean") ||
+                                it.endsWith("refs/tags/v$clean")
+                    }) {
+                    return true
+                }
+            }
+        } catch (_: Throwable) {
         }
-        return Git.getInstance().runCommand(tagVHandler).success()
+
+        // 4. Do not run Git commands on the EDT (avoids "Should not wait for built-in server on EDT")
+        if (ApplicationManager.getApplication().isDispatchThread) {
+            return false
+        }
+
+        // 5. Fallback rev-parse on background thread only
+        return try {
+            val handler = GitLineHandler(project, repository.root, GitCommand.REV_PARSE).apply {
+                addParameters("--verify", "refs/heads/$clean")
+            }
+            if (Git.getInstance().runCommand(handler).success()) return true
+
+            val tagHandler = GitLineHandler(project, repository.root, GitCommand.REV_PARSE).apply {
+                addParameters("--verify", "refs/tags/$clean")
+            }
+            if (Git.getInstance().runCommand(tagHandler).success()) return true
+
+            val tagVHandler = GitLineHandler(project, repository.root, GitCommand.REV_PARSE).apply {
+                addParameters("--verify", "refs/tags/v$clean")
+            }
+            Git.getInstance().runCommand(tagVHandler).success()
+        } catch (_: Exception) {
+            false
+        }
     }
 
     fun getLocalBranches(repository: GitRepository): List<String> {
         val branches = repository.branches.localBranches.map { it.name }
-        if (branches.isNotEmpty()) return branches
+        if (branches.isNotEmpty() || ApplicationManager.getApplication().isDispatchThread) return branches
         val handler = GitLineHandler(project, repository.root, GitCommand.BRANCH).apply {
             addParameters("--list")
         }
@@ -531,6 +583,158 @@ class GitChangesManager(private val project: Project) {
         }
         val result = Git.getInstance().runCommand(handler)
         return if (result.success()) result.outputAsJoinedString.trim() else ""
+    }
+
+    /**
+     * Retrieves all git-tracked files using 'git ls-files -c'.
+     * Automatically respects .gitignore and excludes build/output/ignored/binary artifacts.
+     */
+    fun getTrackedFiles(repository: GitRepository): List<String> {
+        val handler = GitLineHandler(project, repository.root, GitCommand.LS_FILES).apply {
+            addParameters("-c")
+        }
+        val result = Git.getInstance().runCommand(handler)
+        return if (result.success()) {
+            result.output.map { it.trim() }.filter { it.isNotBlank() }
+        } else {
+            emptyList()
+        }
+    }
+
+    /**
+     * Retrieves list of changed files between two revisions (e.g. fromRev..toRev).
+     */
+    fun getChangedFilesBetween(repository: GitRepository, fromRev: String, toRev: String): List<String> {
+        val handler = GitLineHandler(project, repository.root, GitCommand.DIFF).apply {
+            addParameters("--name-only", "${fromRev.trim()}..${toRev.trim()}")
+        }
+        val result = Git.getInstance().runCommand(handler)
+        return if (result.success()) {
+            result.output.map { it.trim() }.filter { it.isNotBlank() }
+        } else {
+            emptyList()
+        }
+    }
+
+    /**
+     * Executes 'git commit-tree' to create a commit object pointing directly to a tree revision
+     * with designated parent commits and a commit message, without checking out any branch or modifying working files.
+     */
+    fun commitTree(
+        repository: GitRepository,
+        treeRev: String,
+        parents: List<String>,
+        message: String
+    ): String? {
+        return try {
+            val gitPath = GitExecutableManager.getInstance().getPathToGit(project)
+            val cmd = GeneralCommandLine(gitPath).apply {
+                workDirectory = File(repository.root.path)
+                addParameter("commit-tree")
+                addParameter(treeRev)
+                for (parent in parents) {
+                    if (parent.isNotBlank()) {
+                        addParameters("-p", parent.trim())
+                    }
+                }
+                addParameters("-m", message)
+            }
+            val output = ExecUtil.execAndGetOutput(cmd)
+            if (output.exitCode == 0) {
+                output.stdout.trim().ifBlank { null }
+            } else {
+                LOG.warn("git commit-tree failed (exit ${output.exitCode}): ${output.stderr}")
+                null
+            }
+        } catch (e: Exception) {
+            LOG.error("Failed to execute commit-tree: ${e.message}", e)
+            null
+        }
+    }
+
+    /**
+     * Ships the release by updating or creating the target release branch from the source branch
+     * using Git plumbing (commit-tree, update-ref) without switching branches or disturbing working files (matching ship.sh).
+     */
+    fun shipRelease(
+        repository: GitRepository,
+        sourceBranch: String,
+        targetBranch: String,
+        message: String,
+        pushToRemote: Boolean = false
+    ): Pair<Boolean, String> {
+        val cleanSource = sourceBranch.trim()
+        val cleanTarget = targetBranch.trim()
+
+        if (cleanSource.isBlank()) {
+            return Pair(false, "Source branch is required.")
+        }
+        if (cleanTarget.isBlank()) {
+            return Pair(false, "Target release branch is required.")
+        }
+
+        // Verify source branch tree exists
+        val treeRev = "${cleanSource}^{tree}"
+        val treeCheck = GitLineHandler(project, repository.root, GitCommand.REV_PARSE).apply {
+            addParameters("--verify", treeRev)
+        }
+        val treeRes = Git.getInstance().runCommand(treeCheck)
+        if (!treeRes.success()) {
+            return Pair(false, "Could not resolve git tree for source branch '$cleanSource'.")
+        }
+
+        val targetExists = branchOrTagExists(repository, cleanTarget)
+        val newCommit = if (targetExists) {
+            // Target exists: create commit with both target and source as parents (merge-commit topology)
+            commitTree(repository, treeRev, listOf(cleanTarget, cleanSource), message)
+        } else {
+            // Target does not exist: create initial commit with source branch as parent
+            commitTree(repository, treeRev, listOf(cleanSource), message)
+        }
+
+        if (newCommit.isNullOrBlank()) {
+            return Pair(false, "Failed to create release commit object with commit-tree.")
+        }
+
+        if (targetExists) {
+            val updateHandler = GitLineHandler(project, repository.root, GitCommand.UPDATE_REF).apply {
+                addParameters("refs/heads/$cleanTarget", newCommit)
+            }
+            val updateRes = Git.getInstance().runCommand(updateHandler)
+            if (!updateRes.success()) {
+                return Pair(
+                    false,
+                    "Failed to update ref 'refs/heads/$cleanTarget': ${updateRes.errorOutputAsJoinedString}"
+                )
+            }
+        } else {
+            val branchHandler = GitLineHandler(project, repository.root, GitCommand.BRANCH).apply {
+                addParameters(cleanTarget, newCommit)
+            }
+            val branchRes = Git.getInstance().runCommand(branchHandler)
+            if (!branchRes.success()) {
+                return Pair(false, "Failed to create branch '$cleanTarget': ${branchRes.errorOutputAsJoinedString}")
+            }
+        }
+
+        var pushMsg = ""
+        if (pushToRemote) {
+            val pushHandler = GitLineHandler(project, repository.root, GitCommand.PUSH).apply {
+                addParameters("-u", "origin", cleanTarget)
+            }
+            val pushRes = Git.getInstance().runCommand(pushHandler)
+            if (!pushRes.success()) {
+                LOG.warn("Push to origin failed: ${pushRes.errorOutputAsJoinedString}")
+                pushMsg = " (Warning: push to origin failed: ${pushRes.errorOutputAsJoinedString})"
+            } else {
+                pushMsg = " and pushed to origin"
+            }
+        }
+
+        repository.update()
+        VcsDirtyScopeManager.getInstance(project).markEverythingDirty()
+
+        return Pair(true, "Successfully shipped to '$cleanTarget'$pushMsg!")
     }
 
     fun createAndCheckoutBranch(repository: GitRepository, branchName: String, startPoint: String? = null): Boolean {
