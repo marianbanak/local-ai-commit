@@ -6,6 +6,7 @@ import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.ui.Messages
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.*
@@ -17,9 +18,11 @@ import tk.mallumo.localai.git.GitChangesManager
 import tk.mallumo.localai.git.GitFileItem
 import tk.mallumo.localai.llm.CommitStrategy
 import tk.mallumo.localai.llm.KoogLlmClient
+import tk.mallumo.localai.settings.CommitMessageSize
 import tk.mallumo.localai.settings.LocalAiCommitSettingsService
 import tk.mallumo.localai.settings.LocalAiUrlStorage
 import java.awt.*
+import javax.swing.DefaultComboBoxModel
 import javax.swing.JButton
 import javax.swing.JPanel
 import javax.swing.SwingConstants
@@ -64,6 +67,13 @@ class AiControlPanel(
     private val rearrangeBox = JBCheckBox("Rearrange Code", settings.rearrangeCode)
     private val selectionInfoLabel = JBLabel("No files selected", SwingConstants.CENTER)
     private val generateBtn = JButton("Generate Commit Message")
+    private val commitSizeComboBox = ComboBox(DefaultComboBoxModel(CommitMessageSize.values())).apply {
+        selectedItem = settings.messageSize
+        addActionListener {
+            val selected = selectedItem as? CommitMessageSize ?: CommitMessageSize.MEDIUM
+            settings.messageSize = selected
+        }
+    }
 
     // 3. Generating / Streaming Card
     private val streamCard = JPanel(BorderLayout())
@@ -217,6 +227,17 @@ class AiControlPanel(
             startGeneration()
         }
         centerPanel.add(generateBtn, gbc)
+
+        gbc.gridy = 2
+        gbc.insets = JBUI.insets(4, 8, 8, 8)
+        val sizePanel = JPanel(FlowLayout(FlowLayout.CENTER, 6, 0)).apply {
+            isOpaque = false
+            add(JBLabel("Commit message size:").apply {
+                font = font.deriveFont(Font.PLAIN, 12f)
+            })
+            add(commitSizeComboBox)
+        }
+        centerPanel.add(sizePanel, gbc)
 
         mainCard.add(topHeader, BorderLayout.NORTH)
         mainCard.add(centerPanel, BorderLayout.CENTER)
@@ -566,9 +587,9 @@ class AiControlPanel(
                     fileStatuses = fileStatuses,
                     fileDiffs = fileDiffs,
                     maxDiffTokens = settings.maxDiffTokens,
-                    systemPrompt = settings.systemPrompt,
-                    chunkSystemPrompt = settings.chunkSystemPrompt,
-                    finalSystemPrompt = settings.finalSystemPrompt,
+                    systemPrompt = settings.getEffectiveSystemPrompt(),
+                    chunkSystemPrompt = settings.getEffectiveChunkSystemPrompt(),
+                    finalSystemPrompt = settings.getEffectiveFinalSystemPrompt(),
                     listener = listener
                 )
 
